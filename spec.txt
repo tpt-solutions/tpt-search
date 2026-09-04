@@ -1,0 +1,1032 @@
+# tpt-search Design Specification
+
+## Mission
+
+Build a complete, distributed, hybrid search and analytics engine in pure Rust that provides:
+- **Unified Hybrid Search**: Scalar (inverted index), vector (HNSW), and graph (property graph) queries in a single engine
+- **Edge-to-Cloud Native**: CRDT-based synchronization for offline-first deployments (police field units, healthcare clinics, aviation maintenance)
+- **Formally Verified Query Execution**: SQL-like query planner with `tpt-telos` guarantees against injection, panics, and resource exhaustion
+- **Time-Series Aware**: Native support for temporal data, multi-rate streams, and range queries over time
+- **Zero Apache-2.0 Dependencies**: Every component is strictly MIT or 0BSD licensed, replacing Elasticsearch/OpenSearch/Solr
+
+This is not a Tantivy wrapper. This is a ground-up reimplementation that replaces the JVM-based Elasticsearch monopoly with a memory-safe, formally verified, distributed alternative designed for the TPT verticals.
+
+---
+
+## The Problem We're Solving
+
+### The Elasticsearch/OpenSearch Licensing Trap
+- **Elasticsearch**: Was Apache-2.0, then Elastic changed to SSPL (not open-source by OSI definition) in 2021.
+- **OpenSearch**: AWS forked it back to Apache-2.0, but it is a JVM-based monolith with massive operational overhead.
+- **Apache Solr**: Apache-2.0, JVM-based, legacy architecture.
+- **Algolia / Pinecone**: Proprietary SaaS, expensive, vendor lock-in.
+
+**The Cost**: Enterprises pay $50k–$500k/year for hosted Elasticsearch, or operate heavy JVM clusters that consume 10× the RAM of equivalent Rust workloads.
+
+### The Fragmentation Problem
+Modern applications need three types of search, but they are split across three different databases:
+1. **Scalar search** (text, numbers, dates) → Elasticsearch / PostgreSQL
+2. **Vector search** (embeddings, similarity) → Pinecone / Qdrant / Milvus
+3. **Graph search** (relationships, traversal) → Neo4j / ArangoDB
+
+This means:
+- Three separate systems to operate, monitor, and secure
+- Three separate consistency models
+- Three separate backup/restore procedures
+- Expensive ETL pipelines to keep them in sync
+
+### The Edge-to-Cloud Gap
+For TPT's verticals:
+- **Police**: Field units need offline search capability, syncing to central records when connectivity returns
+- **Healthcare**: Rural clinics need local patient record search, syncing to central EHR
+- **Aviation**: Maintenance crews in remote locations need offline technical manual search
+- **Robotics**: Edge devices need local sensor search, aggregating to cloud analytics
+
+No existing search engine handles this gracefully. Elasticsearch assumes always-on cloud infrastructure.
+
+---
+
+## Architecture Overview
+
+┌─────────────────────────────────────────────────────────────────┐
+│ tpt-search-api (HTTP/gRPC Interface) │
+│ - RESTful query API │
+│ - gRPC streaming API │
+│ - WebSocket real-time subscriptions │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-query (Query Layer) │
+│ - Query parser (SQL-like DSL) │
+│ - Query planner (cost-based optimization) │
+│ - Query executor (vectorized execution) │
+│ - Formally verified (via tpt-telos) │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-hybrid (Hybrid Search Engine) │
+│ - Unified query coordinator │
+│ - Reciprocal Rank Fusion (RRF) for result merging │
+│ - Cross-index joins (scalar + vector + graph) │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-vector (Vector Search) │
+│ - HNSW index (hierarchical navigable small world) │
+│ - Quantization (PQ, SQ, binary) │
+│ - SIMD-accelerated distance computation │
+│ - Approximate and exact search modes │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-graph (Graph Search) │
+│ - Property graph model (nodes, edges, properties) │
+│ - Traversal engine (BFS, DFS, shortest path) │
+│ - Graph query language (Cypher-like) │
+│ - Graph analytics (centrality, community detection) │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-index (Scalar Search) │
+│ - Inverted index (BM25, TF-IDF) │
+│ - Columnar storage (for analytics) │
+│ - Range indexes (B-tree, Roaring bitmap) │
+│ - Full-text search (tokenization, stemming, phrase matching) │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-storage (Storage Engine) │
+│ - Write-ahead log (WAL) │
+│ - Segment-based storage (LSM-tree inspired) │
+│ - Memory-mapped I/O │
+│ - Snapshot and backup │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-distributed (Distributed Layer) │
+│ - Raft consensus (for metadata and coordination) │
+│ - Shard management (hash-based, range-based) │
+│ - Replication (leader-follower, multi-leader) │
+│ - Query routing and load balancing │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-sync (Edge-to-Cloud Sync) │
+│ - CRDT-based conflict resolution │
+│ - Delta synchronization │
+│ - Offline queue with replay │
+│ - Bandwidth-aware sync (compress, prioritize) │
+├─────────────────────────────────────────────────────────────────┤
+│ tpt-search-core (Foundation) │
+│ - Type system (documents, fields, schemas) │
+│ - Error handling │
+│ - Logging and metrics │
+│ - Async runtime (tokio) │
+└─────────────────────────────────────────────────────────────────┘
+
+
+---
+
+## Module Specifications
+
+### 1. tpt-search-core (Foundation Layer)
+
+**Purpose**: Core types, schemas, error handling, and async runtime integration.
+
+**Dependencies**: `tokio` (MIT), `serde` (MIT OR Apache-2.0, use MIT), `tpt-math-units` (for typed units in temporal data)
+
+**License**: MIT
+
+#### Core Types
+
+```rust
+pub struct Document {
+    pub id: DocumentId,
+    pub fields: HashMap<FieldName, FieldValue>,
+    pub timestamp: DateTime<Utc>,
+    pub version: u64,
+}
+
+pub enum FieldValue {
+    Text(String),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    DateTime(DateTime<Utc>),
+    Vector(Vec<f32>),
+    Array(Vec<FieldValue>),
+    Object(HashMap<FieldName, FieldValue>),
+    Null,
+}
+
+pub struct Schema {
+    pub name: String,
+    pub fields: HashMap<FieldName, FieldSchema>,
+    pub primary_key: FieldName,
+}
+
+pub struct FieldSchema {
+    pub name: FieldName,
+    pub field_type: FieldType,
+    pub indexed: bool,
+    pub stored: bool,
+    pub analyzer: Option<Analyzer>,
+    pub vector_config: Option<VectorConfig>,
+}
+
+pub enum FieldType {
+    Text,
+    Integer,
+    Float,
+    Boolean,
+    DateTime,
+    Vector(u32), // dimension
+    Array(Box<FieldType>),
+    Object(Schema),
+}
+
+pub struct Analyzer {
+    pub tokenizer: Tokenizer,
+    pub filters: Vec<TokenFilter>,
+}
+
+pub enum Tokenizer {
+    Whitespace,
+    Standard,
+    Ngram { min: usize, max: usize },
+    Custom(Vec<String>), // regex patterns
+}
+
+pub enum TokenFilter {
+    Lowercase,
+    Stemmer(Language),
+    StopWords(Language),
+    Length { min: usize, max: usize },
+}
+
+Error Handling
+
+pub enum SearchError {
+    Schema(SchemaError),
+    Index(IndexError),
+    Query(QueryError),
+    Storage(StorageError),
+    Distributed(DistributedError),
+    Sync(SyncError),
+    Io(std::io::Error),
+}
+
+pub enum QueryError {
+    ParseError(String),
+    InvalidField(String),
+    TypeMismatch { expected: FieldType, got: FieldType },
+    Timeout,
+    ResourceExhausted,
+}
+
+2. tpt-search-index (Scalar Search Layer)
+Purpose: Inverted index, columnar storage, and range indexes for scalar data.
+Dependencies: tpt-search-core, tpt-math-linalg (for vectorized operations)
+License: MIT
+Inverted Index
+
+pub struct InvertedIndex {
+    terms: HashMap<Term, PostingList>,
+    schema: Arc<Schema>,
+}
+
+pub struct PostingList {
+    pub doc_ids: RoaringBitmap,
+    pub positions: HashMap<u64, Vec<u32>>, // doc_id -> positions
+    pub frequencies: HashMap<u64, u32>,    // doc_id -> term frequency
+}
+
+impl InvertedIndex {
+    pub fn new(schema: Arc<Schema>) -> Self;
+    pub fn index_document(&mut self, doc: &Document) -> Result<(), IndexError>;
+    pub fn search(&self, query: &TermQuery) -> Result<Vec<ScoredDocument>, IndexError>;
+    pub fn phrase_search(&self, query: &PhraseQuery) -> Result<Vec<ScoredDocument>, IndexError>;
+    pub fn boolean_search(&self, query: &BooleanQuery) -> Result<Vec<ScoredDocument>, IndexError>;
+}
+
+pub struct ScoredDocument {
+    pub doc_id: DocumentId,
+    pub score: f32,
+    pub highlights: Vec<Highlight>,
+}
+
+pub struct Highlight {
+    pub field: FieldName,
+    pub positions: Vec<(usize, usize)>, // start, end byte offsets
+}
+
+Columnar Storage
+
+pub struct ColumnarStore {
+    columns: HashMap<FieldName, Column>,
+    row_count: u64,
+}
+
+pub enum Column {
+    Integer(IntegerColumn),
+    Float(FloatColumn),
+    Boolean(BooleanColumn),
+    DateTime(DateTimeColumn),
+}
+
+pub struct IntegerColumn {
+    pub data: Vec<i64>,
+    pub null_bitmap: RoaringBitmap,
+    pub min: i64,
+    pub max: i64,
+}
+
+impl ColumnarStore {
+    pub fn scan(&self, predicate: &Predicate) -> Result<RoaringBitmap, IndexError>;
+    pub fn aggregate(&self, field: &FieldName, agg: Aggregation) -> Result<AggregationResult, IndexError>;
+    pub fn group_by(&self, group_field: &FieldName, agg: Aggregation) -> Result<HashMap<FieldValue, AggregationResult>, IndexError>;
+}
+
+pub enum Aggregation {
+    Count,
+    Sum,
+    Avg,
+    Min,
+    Max,
+    Percentile(f64),
+}
+
+Range Indexes
+
+pub struct RangeIndex {
+    btree: BTreeMap<FieldValue, RoaringBitmap>,
+    bitmap_index: HashMap<FieldValue, RoaringBitmap>, // for low-cardinality
+}
+
+impl RangeIndex {
+    pub fn insert(&mut self, value: FieldValue, doc_id: u64);
+    pub fn range_query(&self, start: Bound<FieldValue>, end: Bound<FieldValue>) -> RoaringBitmap;
+    pub fn equality_query(&self, value: &FieldValue) -> RoaringBitmap;
+    pub fn in_query(&self, values: &[FieldValue]) -> RoaringBitmap;
+}
+
+3. tpt-search-vector (Vector Search Layer)
+Purpose: High-dimensional vector similarity search using HNSW and quantization.
+Dependencies: tpt-search-core, tpt-math-linalg (for SIMD distance computation)
+License: MIT
+HNSW Index
+
+pub struct HnswIndex {
+    layers: Vec<HnswLayer>,
+    dimension: u32,
+    metric: DistanceMetric,
+    max_connections: usize,
+    ef_construction: usize,
+}
+
+pub struct HnswLayer {
+    pub nodes: HashMap<u64, HnswNode>,
+    pub entry_point: Option<u64>,
+    pub level: usize,
+}
+
+pub struct HnswNode {
+    pub id: u64,
+    pub vector: Vec<f32>,
+    pub neighbors: Vec<u64>,
+}
+
+pub enum DistanceMetric {
+    Cosine,
+    Euclidean,
+    DotProduct,
+    Manhattan,
+}
+
+impl HnswIndex {
+    pub fn new(dimension: u32, metric: DistanceMetric, config: HnswConfig) -> Self;
+    pub fn insert(&mut self, id: u64, vector: &[f32]) -> Result<(), VectorError>;
+    pub fn search(&self, query: &[f32], k: usize, ef: usize) -> Result<Vec<ScoredVector>, VectorError>;
+    pub fn batch_insert(&mut self, vectors: &[(u64, Vec<f32>)]) -> Result<(), VectorError>;
+}
+
+pub struct ScoredVector {
+    pub id: u64,
+    pub score: f32,
+    pub vector: Vec<f32>,
+}
+
+pub struct HnswConfig {
+    pub max_connections: usize,      // M parameter (default 16)
+    pub ef_construction: usize,      // ef_construction (default 200)
+    pub max_layer: usize,            // maximum layer (default 4)
+    pub level_multiplier: f64,       // level generation multiplier (default 1/ln(M))
+}
+
+Quantization
+
+pub enum Quantizer {
+    ProductQuantization(ProductQuantizer),
+    ScalarQuantization(ScalarQuantizer),
+    BinaryQuantization(BinaryQuantizer),
+}
+
+pub struct ProductQuantizer {
+    pub subquantizers: Vec<Subquantizer>,
+    pub dimension: u32,
+    pub num_subquantizers: usize,
+    pub bits_per_subquantizer: usize,
+}
+
+impl ProductQuantizer {
+    pub fn train(&mut self, vectors: &[Vec<f32>]) -> Result<(), VectorError>;
+    pub fn encode(&self, vector: &[f32]) -> Vec<u8>;
+    pub fn decode(&self, code: &[u8]) -> Vec<f32>;
+    pub fn distance(&self, query: &[f32], code: &[u8]) -> f32;
+}
+
+pub struct ScalarQuantizer {
+    pub min: Vec<f32>,
+    pub max: Vec<f32>,
+    pub bits: usize, // 8 or 16
+}
+
+impl ScalarQuantizer {
+    pub fn train(&mut self, vectors: &[Vec<f32>]) -> Result<(), VectorError>;
+    pub fn encode(&self, vector: &[f32]) -> Vec<u8>;
+    pub fn decode(&self, code: &[u8]) -> Vec<f32>;
+}
+
+SIMD-Accelerated Distance
+
+pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    #[cfg(target_arch = "x86_64")]
+    {
+        if is_x86_feature_detected!("avx2") {
+            return unsafe { cosine_similarity_avx2(a, b) };
+        }
+    }
+    #[cfg(target_arch = "aarch64")]
+    {
+        if std::arch::is_aarch64_feature_detected!("neon") {
+            return unsafe { cosine_similarity_neon(a, b) };
+        }
+    }
+    cosine_similarity_fallback(a, b)
+}
+
+#[target_feature(enable = "avx2")]
+unsafe fn cosine_similarity_avx2(a: &[f32], b: &[f32]) -> f32 {
+    // AVX2 implementation using _mm256_* intrinsics
+    // Process 8 floats at a time
+}
+
+4. tpt-search-graph (Graph Search Layer)
+Purpose: Property graph model and traversal engine for relationship queries.
+Dependencies: tpt-search-core, tpt-math-graph (for graph algorithms)
+License: MIT
+Property Graph Model
+
+pub struct PropertyGraph {
+    pub nodes: HashMap<NodeId, Node>,
+    pub edges: HashMap<EdgeId, Edge>,
+    pub node_indexes: HashMap<String, HashMap<PropertyValue, HashSet<NodeId>>>,
+    pub edge_indexes: HashMap<String, HashMap<PropertyValue, HashSet<EdgeId>>>,
+}
+
+pub struct Node {
+    pub id: NodeId,
+    pub labels: Vec<String>,
+    pub properties: HashMap<String, PropertyValue>,
+}
+
+pub struct Edge {
+    pub id: EdgeId,
+    pub source: NodeId,
+    pub target: NodeId,
+    pub label: String,
+    pub properties: HashMap<String, PropertyValue>,
+}
+
+pub enum PropertyValue {
+    String(String),
+    Integer(i64),
+    Float(f64),
+    Boolean(bool),
+    DateTime(DateTime<Utc>),
+    Array(Vec<PropertyValue>),
+}
+
+impl PropertyGraph {
+    pub fn new() -> Self;
+    pub fn add_node(&mut self, node: Node) -> Result<(), GraphError>;
+    pub fn add_edge(&mut self, edge: Edge) -> Result<(), GraphError>;
+    pub fn get_node(&self, id: NodeId) -> Option<&Node>;
+    pub fn get_edge(&self, id: EdgeId) -> Option<&Edge>;
+    pub fn neighbors(&self, node_id: NodeId, direction: Direction) -> Vec<NodeId>;
+    pub fn traverse(&self, start: NodeId, pattern: &TraversalPattern) -> Vec<TraversalResult>;
+}
+
+pub enum Direction {
+    Outgoing,
+    Incoming,
+    Both,
+}
+
+pub struct TraversalPattern {
+    pub edge_labels: Option<Vec<String>>,
+    pub node_labels: Option<Vec<String>>,
+    pub max_depth: usize,
+    pub filters: Vec<TraversalFilter>,
+}
+
+Graph Query Language (Cypher-like)
+
+pub struct GraphQuery {
+    pub pattern: MatchPattern,
+    pub where_clause: Option<WhereClause>,
+    pub return_clause: ReturnClause,
+    pub order_by: Option<OrderBy>,
+    pub limit: Option<usize>,
+}
+
+pub struct MatchPattern {
+    pub nodes: Vec<NodePattern>,
+    pub edges: Vec<EdgePattern>,
+}
+
+pub struct NodePattern {
+    pub variable: String,
+    pub labels: Vec<String>,
+    pub properties: HashMap<String, PropertyValue>,
+}
+
+pub struct EdgePattern {
+    pub variable: String,
+    pub label: Option<String>,
+    pub direction: Direction,
+    pub properties: HashMap<String, PropertyValue>,
+}
+
+pub fn parse_graph_query(query: &str) -> Result<GraphQuery, QueryError>;
+
+// Example query:
+// MATCH (p:Person)-[:WORKS_AT]->(c:Company)
+// WHERE c.name = "TPT Solutions"
+// RETURN p.name, c.name
+
+Graph Analytics
+
+pub struct GraphAnalytics;
+
+impl GraphAnalytics {
+    pub fn shortest_path(graph: &PropertyGraph, start: NodeId, end: NodeId) -> Option<Vec<NodeId>>;
+    pub fn betweenness_centrality(graph: &PropertyGraph) -> HashMap<NodeId, f64>;
+    pub fn page_rank(graph: &PropertyGraph, damping: f64, iterations: usize) -> HashMap<NodeId, f64>;
+    pub fn community_detection(graph: &PropertyGraph) -> HashMap<NodeId, usize>;
+    pub fn connected_components(graph: &PropertyGraph) -> Vec<HashSet<NodeId>>;
+}
+
+5. tpt-search-query (Query Layer)
+Purpose: Unified query parser, planner, and executor for hybrid search.
+Dependencies: tpt-search-core, tpt-search-index, tpt-search-vector, tpt-search-graph, tpt-math-optimize (for query optimization)
+License: MIT
+Query DSL
+
+pub enum Query {
+    // Scalar queries
+    Term { field: String, value: FieldValue },
+    Range { field: String, start: Bound<FieldValue>, end: Bound<FieldValue> },
+    Match { field: String, text: String, analyzer: Option<String> },
+    Phrase { field: String, text: String, slop: usize },
+    Boolean { must: Vec<Query>, should: Vec<Query>, must_not: Vec<Query> },
+    
+    // Vector queries
+    Knn { field: String, vector: Vec<f32>, k: usize, ef: usize },
+    
+    // Graph queries
+    Graph(GraphQuery),
+    
+    // Hybrid queries
+    Hybrid {
+        scalar: Option<Box<Query>>,
+        vector: Option<Box<Query>>,
+        graph: Option<Box<GraphQuery>>,
+        fusion: FusionMethod,
+    },
+}
+
+pub enum FusionMethod {
+    ReciprocalRankFusion { k: usize }, // default k=60
+    LinearCombination { weights: Vec<f32> },
+    Interleaving,
+}
+
+pub fn parse_query(query_str: &str) -> Result<Query, QueryError>;
+
+// Example hybrid query:
+// HYBRID(
+//   scalar: MATCH(title, "rust programming") AND year >= 2020,
+//   vector: KNN(embedding, [0.1, 0.2, ...], k=10),
+//   fusion: RRF(k=60)
+// )
+
+Query Planner
+
+pub struct QueryPlanner {
+    schema: Arc<Schema>,
+    statistics: Arc<IndexStatistics>,
+}
+
+pub struct QueryPlan {
+    pub root: PlanNode,
+    pub estimated_cost: f64,
+    pub estimated_cardinality: usize,
+}
+
+pub enum PlanNode {
+    Scan { index: String, predicate: Predicate },
+    IndexLookup { index: String, key: FieldValue },
+    VectorSearch { index: String, query: Vec<f32>, k: usize },
+    GraphTraversal { pattern: TraversalPattern },
+    Join { left: Box<PlanNode>, right: Box<PlanNode>, join_type: JoinType },
+    Filter { input: Box<PlanNode>, predicate: Predicate },
+    Sort { input: Box<PlanNode>, order_by: Vec<SortKey> },
+    Limit { input: Box<PlanNode>, limit: usize },
+    Aggregate { input: Box<PlanNode>, group_by: Vec<String>, aggregations: Vec<Aggregation> },
+    Fusion { inputs: Vec<PlanNode>, method: FusionMethod },
+}
+
+impl QueryPlanner {
+    pub fn plan(&self, query: &Query) -> Result<QueryPlan, QueryError>;
+    pub fn optimize(&self, plan: QueryPlan) -> Result<QueryPlan, QueryError>;
+}
+
+Query Executor
+
+pub struct QueryExecutor {
+    indexes: Arc<IndexRegistry>,
+    vector_indexes: Arc<VectorIndexRegistry>,
+    graph: Arc<PropertyGraph>,
+}
+
+impl QueryExecutor {
+    pub fn execute(&self, plan: &QueryPlan) -> Result<QueryResult, QueryError>;
+    pub fn execute_streaming(&self, plan: &QueryPlan) -> Result<impl Stream<Item = Result<QueryResult, QueryError>>, QueryError>;
+}
+
+pub struct QueryResult {
+    pub documents: Vec<Document>,
+    pub total_hits: usize,
+    pub took_ms: u64,
+    pub highlights: HashMap<DocumentId, Vec<Highlight>>,
+}
+
+Formal Verification (via tpt-telos)
+
+// Formal contracts for query execution
+#[requires(query.is_well_formed())]
+#[ensures(result.is_ok() ==> result.documents.len() <= query.limit.unwrap_or(usize::MAX))]
+#[ensures(result.is_ok() ==> result.documents.iter().all(|d| schema.matches(d)))]
+pub fn execute(executor: &QueryExecutor, plan: &QueryPlan) -> Result<QueryResult, QueryError>;
+
+// Resource bounds
+#[requires(plan.estimated_cost < MAX_QUERY_COST)]
+#[ensures(result.is_ok() ==> result.took_ms < MAX_QUERY_TIME_MS)]
+pub fn execute_with_bounds(executor: &QueryExecutor, plan: &QueryPlan) -> Result<QueryResult, QueryError>;
+
+// Injection prevention
+#[requires(!query.contains_sql_injection_patterns())]
+#[ensures(result.is_ok() ==> !result.contains_unexpected_data())]
+pub fn execute_safe(executor: &QueryExecutor, query: &Query) -> Result<QueryResult, QueryError>;
+
+6. tpt-search-storage (Storage Engine)
+Purpose: Persistent storage with WAL, segments, and memory-mapped I/O.
+Dependencies: tpt-search-core, memmap2 (MIT), tpt-mit-hash (for checksums)
+License: MIT
+Write-Ahead Log
+
+pub struct WriteAheadLog {
+    file: File,
+    current_segment: u64,
+    current_offset: u64,
+}
+
+pub enum WalEntry {
+    Insert(Document),
+    Update(Document),
+    Delete(DocumentId),
+    Commit { sequence: u64 },
+    Checkpoint { sequence: u64 },
+}
+
+impl WriteAheadLog {
+    pub fn open(path: &Path) -> Result<Self, StorageError>;
+    pub fn append(&mut self, entry: WalEntry) -> Result<u64, StorageError>;
+    pub fn replay(&self) -> Result<Vec<WalEntry>, StorageError>;
+    pub fn checkpoint(&mut self) -> Result<(), StorageError>;
+}
+
+Segment-Based Storage
+
+pub struct Segment {
+    pub id: SegmentId,
+    pub min_doc_id: u64,
+    pub max_doc_id: u64,
+    pub inverted_index: InvertedIndex,
+    pub columnar_store: ColumnarStore,
+    pub stored_fields: StoredFields,
+    pub deleted_docs: RoaringBitmap,
+}
+
+pub struct SegmentManager {
+    segments: Vec<Segment>,
+    max_segment_size: usize,
+    merge_policy: MergePolicy,
+}
+
+impl SegmentManager {
+    pub fn add_segment(&mut self, segment: Segment);
+    pub fn search(&self, query: &Query) -> Result<Vec<ScoredDocument>, StorageError>;
+    pub fn merge_segments(&mut self, segment_ids: &[SegmentId]) -> Result<Segment, StorageError>;
+    pub fn flush(&mut self) -> Result<(), StorageError>;
+}
+
+pub enum MergePolicy {
+    SizeTiered { min_segments: usize, max_segments: usize },
+    LogStructured { target_size: usize },
+}
+
+Memory-Mapped I/O
+
+pub struct MappedSegment {
+    mmap: Mmap,
+    segment_metadata: SegmentMetadata,
+}
+
+impl MappedSegment {
+    pub fn open(path: &Path) -> Result<Self, StorageError>;
+    pub fn get_posting_list(&self, term: &Term) -> &[u8];
+    pub fn get_stored_field(&self, doc_id: u64, field: &FieldName) -> &[u8];
+}
+
+7. tpt-search-distributed (Distributed Layer)
+Purpose: Raft consensus, sharding, replication, and query routing.
+Dependencies: tpt-search-core, tpt-search-storage, raft (MIT, or in-house implementation)
+License: MIT
+Raft Consensus
+
+pub struct RaftNode {
+    pub id: NodeId,
+    pub state: RaftState,
+    pub log: RaftLog,
+    pub peers: HashMap<NodeId, PeerInfo>,
+    pub current_term: u64,
+    pub voted_for: Option<NodeId>,
+}
+
+pub enum RaftState {
+    Follower,
+    Candidate,
+    Leader,
+}
+
+pub enum RaftMessage {
+    RequestVote(RequestVoteRequest),
+    RequestVoteResponse(RequestVoteResponse),
+    AppendEntries(AppendEntriesRequest),
+    AppendEntriesResponse(AppendEntriesResponse),
+}
+
+impl RaftNode {
+    pub fn new(id: NodeId, peers: Vec<NodeId>) -> Self;
+    pub fn handle_message(&mut self, msg: RaftMessage) -> Vec<RaftMessage>;
+    pub fn propose(&mut self, command: Command) -> Result<(), DistributedError>;
+    pub fn tick(&mut self) -> Vec<RaftMessage>;
+}
+
+Sharding
+
+pub struct ShardManager {
+    pub shards: HashMap<ShardId, ShardInfo>,
+    pub replication_factor: usize,
+}
+
+pub struct ShardInfo {
+    pub id: ShardId,
+    pub primary: NodeId,
+    pub replicas: Vec<NodeId>,
+    pub hash_range: (u64, u64),
+}
+
+pub enum ShardingStrategy {
+    Hash { partitions: usize },
+    Range { split_points: Vec<FieldValue> },
+    Custom(Box<dyn ShardingFunction>),
+}
+
+impl ShardManager {
+    pub fn route_query(&self, query: &Query) -> Vec<ShardId>;
+    pub fn route_document(&self, doc: &Document) -> ShardId;
+    pub fn rebalance(&mut self) -> Result<Vec<ShardMigration>, DistributedError>;
+}
+
+Query Routing
+
+pub struct QueryRouter {
+    shard_manager: Arc<ShardManager>,
+    load_balancer: LoadBalancer,
+}
+
+impl QueryRouter {
+    pub fn route(&self, query: &Query) -> Result<Vec<NodeId>, DistributedError>;
+    pub fn scatter_gather(&self, query: &Query, nodes: &[NodeId]) -> Result<QueryResult, DistributedError>;
+}
+
+pub enum LoadBalancer {
+    RoundRobin,
+    LeastConnections,
+    Random,
+    Weighted(Vec<(NodeId, u32)>),
+}
+
+8. tpt-search-sync (Edge-to-Cloud Sync)
+Purpose: CRDT-based synchronization for offline-first deployments.
+Dependencies: tpt-search-core, tpt-search-storage
+License: MIT
+CRDT Types
+
+pub enum CrdtDocument {
+    Lww(LwwDocument),      // Last-Writer-Wins
+    OrSet(OrSetDocument),  // Observed-Remove Set
+    GCounter(GCounter),    // Grow-only counter
+    PnCounter(PnCounter),  // Positive-Negative counter
+}
+
+pub struct LwwDocument {
+    pub id: DocumentId,
+    pub data: HashMap<String, FieldValue>,
+    pub timestamp: DateTime<Utc>,
+    pub replica_id: ReplicaId,
+}
+
+pub struct OrSetDocument {
+    pub id: DocumentId,
+    pub elements: HashMap<String, (HashSet<UniqueTag>, HashSet<UniqueTag>)>, // (added, removed)
+}
+
+impl LwwDocument {
+    pub fn merge(&self, other: &LwwDocument) -> LwwDocument {
+        if self.timestamp > other.timestamp {
+            self.clone()
+        } else {
+            other.clone()
+        }
+    }
+}
+
+Delta Synchronization
+
+pub struct SyncEngine {
+    local_store: Arc<SegmentManager>,
+    sync_log: SyncLog,
+    remote_endpoint: String,
+}
+
+pub struct SyncLog {
+    pub entries: Vec<SyncEntry>,
+    pub last_sync_timestamp: DateTime<Utc>,
+}
+
+pub struct SyncEntry {
+    pub document_id: DocumentId,
+    pub operation: SyncOperation,
+    pub timestamp: DateTime<Utc>,
+    pub data: Option<Document>,
+}
+
+pub enum SyncOperation {
+    Insert,
+    Update,
+    Delete,
+}
+
+impl SyncEngine {
+    pub fn sync(&mut self) -> Result<SyncReport, SyncError>;
+    pub fn get_delta(&self, since: DateTime<Utc>) -> Result<Vec<SyncEntry>, SyncError>;
+    pub fn apply_delta(&mut self, delta: Vec<SyncEntry>) -> Result<(), SyncError>;
+    pub fn resolve_conflicts(&mut self, local: &Document, remote: &Document) -> Document;
+}
+
+pub struct SyncReport {
+    pub pushed: usize,
+    pub pulled: usize,
+    pub conflicts_resolved: usize,
+    pub errors: Vec<SyncError>,
+}
+
+Bandwidth-Aware Sync
+
+pub struct BandwidthManager {
+    pub available_bandwidth: u64, // bytes per second
+    pub priority_queue: PriorityQueue<DocumentId, SyncPriority>,
+}
+
+pub enum SyncPriority {
+    Critical, // immediate sync required
+    High,     // sync within 1 minute
+    Normal,   // sync within 5 minutes
+    Low,      // sync when bandwidth available
+}
+
+impl BandwidthManager {
+    pub fn should_sync(&self, doc_size: usize) -> bool;
+    pub fn compress_delta(&self, delta: &mut Vec<SyncEntry>);
+    pub fn prioritize(&mut self, doc_id: DocumentId, priority: SyncPriority);
+}
+
+9. tpt-search-api (HTTP/gRPC Interface)
+Purpose: RESTful and gRPC APIs for external access.
+Dependencies: tpt-search-query, tpt-search-distributed, axum (MIT), tonic (MIT)
+License: MIT
+REST API
+
+pub struct SearchApi {
+    executor: Arc<QueryExecutor>,
+    schema_registry: Arc<SchemaRegistry>,
+}
+
+impl SearchApi {
+    pub fn routes(&self) -> axum::Router {
+        Router::new()
+            .route("/api/v1/search", post(self.search))
+            .route("/api/v1/index/:name", post(self.create_index))
+            .route("/api/v1/index/:name/doc", post(self.index_document))
+            .route("/api/v1/index/:name/doc/:id", get(self.get_document))
+            .route("/api/v1/index/:name/doc/:id", delete(self.delete_document))
+            .route("/api/v1/graphql", post(self.graphql))
+            .route("/api/v1/stream", get(self.stream_results))
+    }
+
+    async fn search(&self, request: SearchRequest) -> impl IntoResponse {
+        let query = parse_query(&request.query)?;
+        let result = self.executor.execute(&query)?;
+        Json(result)
+    }
+}
+
+#[derive(Deserialize)]
+pub struct SearchRequest {
+    pub query: String,
+    pub limit: Option<usize>,
+    pub offset: Option<usize>,
+    pub highlight: Option<HighlightConfig>,
+}
+
+gRPC API
+
+#[tonic::async_trait]
+pub trait SearchService: Send + Sync + 'static {
+    async fn search(&self, request: tonic::Request<SearchRequest>) -> Result<tonic::Response<SearchResponse>, tonic::Status>;
+    async fn index_document(&self, request: tonic::Request<IndexRequest>) -> Result<tonic::Response<IndexResponse>, tonic::Status>;
+    async fn stream_results(&self, request: tonic::Request<StreamRequest>) -> Result<tonic::Response<tonic::codec::Streaming<SearchResult>>, tonic::Status>;
+}
+
+pub struct SearchGrpcService {
+    executor: Arc<QueryExecutor>,
+}
+
+#[tonic::async_trait]
+impl SearchService for SearchGrpcService {
+    async fn search(&self, request: tonic::Request<SearchRequest>) -> Result<tonic::Response<SearchResponse>, tonic::Status> {
+        // Implementation
+    }
+}
+
+Implementation Roadmap
+Phase 1: Core Foundation (Months 1-4)
+Deliverables:
+tpt-search-core with complete type system and schema management
+tpt-search-index with inverted index, columnar storage, and range indexes
+tpt-search-storage with WAL and segment-based storage
+Basic query parser and executor for scalar queries
+Unit tests and benchmarks
+Milestone: Can index and search documents with full-text, range, and boolean queries.
+Phase 2: Vector Search (Months 5-8)
+Deliverables:
+tpt-search-vector with HNSW index
+Product quantization and scalar quantization
+SIMD-accelerated distance computation (AVX2, NEON)
+Integration with scalar search for hybrid queries
+Benchmarks against FAISS and Annoy
+Milestone: Can perform k-NN search with cosine similarity at million-vector scale.
+Phase 3: Graph Search (Months 9-12)
+Deliverables:
+tpt-search-graph with property graph model
+Graph traversal engine (BFS, DFS, shortest path)
+Cypher-like query language parser
+Graph analytics (PageRank, community detection)
+Integration with scalar and vector search
+Milestone: Can traverse graphs and perform hybrid scalar+vector+graph queries.
+Phase 4: Distributed Layer (Months 13-18)
+Deliverables:
+tpt-search-distributed with Raft consensus
+Shard management (hash-based and range-based)
+Replication (leader-follower)
+Query routing and scatter-gather execution
+Cluster management API
+Milestone: Can run a 3-node cluster with automatic failover and consistent reads.
+Phase 5: Edge-to-Cloud Sync (Months 19-22)
+Deliverables:
+tpt-search-sync with CRDT-based conflict resolution
+Delta synchronization protocol
+Offline queue with replay
+Bandwidth-aware sync with compression
+Sync monitoring and conflict resolution UI
+Milestone: Can sync data between edge devices and cloud with offline capability and automatic conflict resolution.
+Phase 6: API & Polish (Months 23-26)
+Deliverables:
+tpt-search-api with REST and gRPC interfaces
+WebSocket real-time subscriptions
+Query optimization and cost-based planner
+Comprehensive documentation and examples
+Performance tuning and production hardening
+Milestone: Production-ready search engine with full API surface.
+Phase 7: Bindings & Ecosystem (Months 27-30)
+Deliverables:
+tpt-search-capi with C API (via cbindgen)
+tpt-search-py with Python bindings (via pyo3)
+Go bindings (via C API or rust2go)
+Integration examples for TPT verticals (healthcare, police, aviation)
+Community outreach and adoption
+Milestone: Drop-in replacement for Elasticsearch in Rust, Python, Go, and C++ ecosystems.
+Licensing Strategy
+Dependency Audit
+Component
+License
+Status
+tokio
+MIT
+✅ Safe
+serde
+MIT OR Apache-2.0
+✅ Use under MIT
+axum
+MIT
+✅ Safe
+tonic
+MIT
+✅ Safe
+memmap2
+MIT OR Apache-2.0
+✅ Use under MIT
+roaring
+MIT OR Apache-2.0
+✅ Use under MIT
+raft
+MIT
+✅ Safe (or in-house)
+Compliance Checks
+
+# Run cargo-deny to verify no GPL/Apache-only dependencies
+cargo deny check licenses
+
+# Configuration in deny.toml:
+[licenses]
+allow = ["MIT", "0BSD", "Zlib", "BSD-2-Clause", "BSD-3-Clause", "ISC"]
+deny = ["GPL-3.0", "AGPL-3.0", "Apache-2.0"]
+
+Success Metrics
+Performance: 10× faster than Elasticsearch for equivalent workloads (due to Rust vs JVM)
+Memory Efficiency: 5× lower memory footprint than Elasticsearch
+Scalability: Linear scaling to 100+ nodes with consistent sub-100ms query latency
+Hybrid Search: Unified scalar+vector+graph queries with <10% overhead vs. separate systems
+Edge Sync: <5 second sync latency for typical document updates over 4G networks
+Licensing: Zero GPL or Apache-only dependencies in entire dependency tree
+Adoption: At least 3 production deployments in TPT verticals within 12 months of release
+
+
