@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "Graph search for tpt-search: property graph, traversal, analytics, and pattern matching"
+keywords = ["graph", "pagerank", "shortest-path", "cypher", "graph-search"]
+categories = ["algorithms", "data-structures"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

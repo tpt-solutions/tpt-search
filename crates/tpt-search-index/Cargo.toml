@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "Scalar search for tpt-search: BM25 inverted index, columnar aggregations, and range indexes"
+keywords = ["search", "inverted-index", "bm25", "full-text", "columnar"]
+categories = ["database-implementations", "data-structures"]
 
 [dependencies]
 chrono = "0.4.45"

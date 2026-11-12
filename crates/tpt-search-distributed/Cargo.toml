@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "Distributed layer for tpt-search: sharding, query routing, and Raft consensus"
+keywords = ["distributed", "raft", "consensus", "sharding", "scatter-gather"]
+categories = ["database-implementations", "network-programming"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

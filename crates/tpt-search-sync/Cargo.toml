@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "Edge-to-cloud sync for tpt-search: CRDTs, offline-queued delta sync, and bandwidth planning"
+keywords = ["crdt", "sync", "offline-first", "edge", "delta-sync"]
+categories = ["database-implementations", "network-programming"]
 
 [dependencies]
 flate2 = "1.1.11"

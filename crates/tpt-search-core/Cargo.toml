@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "Core types for tpt-search: documents, schemas, text analysis, errors, and runtime helpers"
+keywords = ["search", "text-analysis", "tokenizer", "stemming", "full-text"]
+categories = ["database-implementations", "text-processing"]
 
 [dependencies]
 chrono = { version = "0.4.45", features = ["serde"] }

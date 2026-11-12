@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "Persistence for tpt-search: checksummed write-ahead log, mmap segments, and snapshots"
+keywords = ["write-ahead-log", "persistence", "mmap", "snapshot", "segments"]
+categories = ["database-implementations", "filesystem"]
 
 [dependencies]
 crc32fast = "1.5.5"

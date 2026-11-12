@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "Vector search for tpt-search: SIMD distance kernels, HNSW, and quantization"
+keywords = ["vector-search", "hnsw", "knn", "simd", "quantization"]
+categories = ["algorithms", "data-structures"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }

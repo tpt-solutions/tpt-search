@@ -7,6 +7,10 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
+readme = "README.md"
+description = "SQL-like query language, rule-based planner, and executor for tpt-search"
+keywords = ["query-language", "query-planner", "sql", "search", "query-engine"]
+categories = ["database-implementations", "parser-implementations"]
 
 [dependencies]
 roaring = "0.11.3"
