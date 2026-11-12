@@ -39,6 +39,9 @@ pub enum WalEntry {
         /// Last sequence number covered by the checkpoint.
         sequence: u64,
     },
+    /// Caller-defined bytes. Lets other layers (such as the sync queue) keep their own
+    /// records in the same durable log.
+    Opaque(Vec<u8>),
 }
 
 /// Append-only, checksummed, fsynced log of [`WalEntry`] values.
@@ -259,5 +262,27 @@ mod tests {
             .map(|(s, _)| s)
             .collect();
         assert_eq!(seqs, [50, 51]);
+    }
+}
+
+#[cfg(test)]
+mod opaque_tests {
+    use super::*;
+
+    #[test]
+    fn opaque_records_round_trip_through_reopen() {
+        let dir = std::env::temp_dir().join(format!("tpt-wal-opaque-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("wal.log");
+        {
+            let mut wal = WriteAheadLog::open(&path).unwrap();
+            wal.append(WalEntry::Opaque(vec![1, 2, 3])).unwrap();
+            wal.append(WalEntry::Opaque(Vec::new())).unwrap();
+        }
+        let wal = WriteAheadLog::open(&path).unwrap();
+        let records = wal.replay().unwrap();
+        assert_eq!(records[0].1, WalEntry::Opaque(vec![1, 2, 3]));
+        assert_eq!(records[1].1, WalEntry::Opaque(Vec::new()));
     }
 }
