@@ -20,9 +20,10 @@
 >    AVX2/NEON SIMD intrinsics (`tpt-search-vector`) and `memmap2` mmap I/O
 >    (`tpt-search-storage`), both of which need `unsafe`. Only those two crates
 >    carry an explicit `#![allow(unsafe_code)]`.
-> 3. **Raft: wrap `openraft` (MIT), not in-house.** `spec.txt` allows either;
->    an in-house Raft is a multi-month project on its own. `tpt-search-distributed`
->    wraps `openraft` and focuses its own scope on sharding/replication/routing.
+> 3. **Raft: in-house (superseded the original "wrap openraft" choice).** openraft pulls in
+>    Apache-2.0-only crates that `deny.toml` rejects, and `async-raft` failed in testing
+>    (see Phase 4). `tpt-search-distributed` implements Raft itself. Sharding and routing
+>    sit on top of it.
 > 4. **No new `tpt-mit-hash` crate.** `spec.txt` names it as a checksum
 >    dependency but it doesn't exist anywhere in the workspace. `tpt-search-storage`
 >    depends directly on an existing dual MIT/Apache-2.0 hash crate (e.g.
@@ -201,41 +202,94 @@ Term and boolean queries are dominated by materializing tens of thousands of hit
 (AVX2/NEON), integration with scalar search for hybrid queries.*
 *Milestone: can perform k-NN search with cosine similarity at million-vector scale.*
 
+**Phase 2 deviations and notes** (recorded as built):
+- `tpt-math-linalg` is not wired in. The distance kernels live in this crate (AVX2 and
+  NEON with runtime dispatch), and I did not review `tpt-math-linalg`'s API before
+  deciding to keep the crate's dependency set small.
+- `HnswLayer` is not a separate type. Each `HnswNode` stores its neighbour list per
+  layer, which is the same data without an extra wrapper.
+- `DistanceMetric` lives in `tpt-search-core`, so schemas can name it without a
+  dependency cycle. The vector crate re-exports it.
+- Cosine indexes store unit-length vectors, so a cosine distance is one dot product
+  (`1 - dot`). Scores are unchanged.
+- Quantizers are standalone (PQ with asymmetric distance tables, scalar, binary).
+  HNSW stores full-precision vectors, so quantized codes are not used for graph
+  traversal yet.
+- The NEON kernels are type-checked for `aarch64-apple-darwin` but have not been run.
+  This machine is Windows x86_64.
+- Neighbour pruning uses the diversity heuristic. A nearest-only shortcut was
+  measured and rejected: it cut clustered-data recall from 1.00 to 0.76 because it
+  removed the links that bridge clusters.
+- Search uses an accept predicate, so deleted or superseded rows are filtered inside
+  the graph search rather than after it.
+
+**Phase 2 benchmark baseline** (`cargo run --release` example and `cargo bench`; Windows,
+single machine, single thread; recall is tie-aware against exact cosine search with
+200 queries, k=10):
+
+| Workload (128-d unless noted) | Build | Recall@10 at ef 100 / 200 / 400 | Query p50 at ef 100 / 200 / 400 |
+|---|---|---|---|
+| 1M clustered (1000 centres, realistic embedding-like data) | 412 s (2,427 inserts/s) | 0.981 / 0.982 / 0.986 | 0.38 / 0.30 / 0.35 ms |
+| 1M uniform random (adversarial: no low-dimensional structure) | 2,735 s (366 inserts/s)* | 0.093 / 0.165 / 0.285 | 1.57 / 2.27 / 3.65 ms* |
+| 100k clustered | 45 s* | 1.000 at all three | 0.16 ms* |
+| 16-d uniform, 100k (graph sanity check) | 22 s* | 0.9995 / 1.000 / 1.000 | 0.26 ms* |
+
+* Measured before the kernel speed-up (criterion below), so build time and latency
+are pessimistic. Recall does not depend on kernel speed. The 1M clustered row was
+re-run on the final code.
+
+Criterion (`cargo bench -p tpt-search-vector`, short 2–3 s windows, median):
+
+| Benchmark | Time |
+|---|---|
+| `distance_kernels/dot/128` (AVX2) | 8.0 ns |
+| `distance_kernels/squared_l2/128` | 9.9 ns |
+| `distance_kernels/cosine_distance/128` | 31 ns |
+| `distance_kernels/dot/768` | 41 ns |
+| `hnsw/build_20k_x128` | 4.3 s |
+| `hnsw/search_k10_ef100_20k` | 137 µs |
+
+Open problem: on uniform random 128-d data, recall@10 is low (0.09 at ef=100, 0.29 at
+ef=400, 1M vectors). The graph itself is sound, as shown by the 16-d and clustered
+results. Uniform random vectors in 128 dimensions have almost no neighbourhood
+structure, which is the known hard case for graph indexes. I have not yet separated
+"inherent difficulty" from "a tuning issue". Next steps would be a larger `m`, a larger
+`ef_construction`, or quantized re-ranking.
+
 ### tpt-search-vector
 
-- [ ] Scaffold `crates/tpt-search-vector/`
-- [ ] Wire deps: `tpt-search-core`, `tpt-math-linalg`
-- [ ] `#![allow(unsafe_code)]` carve-out (deviation #2 — needed for SIMD intrinsics)
-- [ ] Implement `HnswIndex`, `HnswLayer`, `HnswNode`, `DistanceMetric`, `HnswConfig`
-- [ ] Implement `insert` / `search` / `batch_insert`, `ScoredVector`
-- [ ] Implement `ProductQuantizer` (`train` / `encode` / `decode` / `distance`), `Subquantizer`
-- [ ] Implement `ScalarQuantizer` (`train` / `encode` / `decode`)
-- [ ] Implement `BinaryQuantizer`
-- [ ] SIMD-accelerated distance: `cosine_similarity`, plus Euclidean/dot-product/Manhattan,
-      with AVX2 (x86_64), NEON (aarch64), and scalar fallback dispatch
-- [ ] Unit tests + doctests
-- [ ] Property tests for HNSW recall (proptest)
-- [ ] Benchmarks (criterion): insert/search throughput and recall at scale.
-      Run any FAISS/Annoy comparison as an **external harness/script only**
-      — do not add either as a linked Rust dependency (Annoy is Apache-2.0-only)
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Scaffold `crates/tpt-search-vector/`
+- [ ] Wire deps: `tpt-search-core`, `tpt-math-linalg` — `tpt-math-linalg` not wired (see notes)
+- [x] `#![allow(unsafe_code)]` carve-out (deviation #2 — needed for SIMD intrinsics)
+- [x] Implement `HnswIndex`, `HnswNode`, `DistanceMetric`, `HnswConfig` (`HnswLayer` folded into `HnswNode`)
+- [x] Implement `insert` / `search` / `batch_insert`, `ScoredVector` (plus `search_filtered`)
+- [x] Implement `ProductQuantizer` (`train` / `encode` / `decode` / `distance_table`), `Subquantizer`
+- [x] Implement `ScalarQuantizer` (`train` / `encode` / `decode`)
+- [x] Implement `BinaryQuantizer`
+- [x] SIMD-accelerated distance: `cosine_similarity`, plus Euclidean/dot-product/Manhattan,
+      with AVX2 (x86_64, runtime-detected), NEON (aarch64, type-checked, not run here), and scalar fallback
+- [x] Unit tests + doctests
+- [x] Property tests for HNSW recall (proptest)
+- [x] Benchmarks (criterion): distance kernels, HNSW build and query; scale example at 100k and 1M
+- [ ] FAISS/Annoy comparison harness (external script only) — not done
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### tpt-search-query (vector integration)
 
-- [ ] Extend `Query` DSL with `Knn { field, vector, k, ef }`
-- [ ] Extend `QueryPlanner` with `PlanNode::VectorSearch`
-- [ ] Extend `QueryExecutor` to run vector-search plans
-- [ ] Add scalar+vector `Hybrid` query variant with `FusionMethod::ReciprocalRankFusion` (graph fusion arrives in Phase 3)
-- [ ] Unit tests + doctests for hybrid scalar+vector queries
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Extend `Query` DSL with `Knn { field, vector, k, ef }` (`KNN(field, [..], k=N[, ef=M])`)
+- [x] Extend `QueryPlanner` with `PlanNode::VectorSearch`
+- [x] Extend `QueryExecutor` to run vector-search plans
+- [x] Add scalar+vector `Hybrid` query variant with `FusionMethod::ReciprocalRankFusion` (graph fusion arrives in Phase 3)
+- [x] Unit tests + doctests for hybrid scalar+vector queries
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### Phase 2 wrap-up
 
-- [ ] **Milestone check:** k-NN search with cosine similarity at million-vector scale
+- [x] **Milestone check:** k-NN search with cosine similarity at million-vector scale — met on clustered 1M vectors (recall@10 0.98 at ef=100). Uniform random 1M vectors remain low-recall (see the open problem above).
 
 ---
 
@@ -245,38 +299,66 @@ Term and boolean queries are dominated by materializing tens of thousands of hit
 Cypher-like query language, graph analytics, integration with scalar+vector search.*
 *Milestone: can traverse graphs and perform hybrid scalar+vector+graph queries.*
 
+**Phase 3 deviations and notes** (recorded as built):
+- `tpt-math-graph` is not wired in. The graph algorithms are implemented in-crate
+  (BFS, DFS, Brandes betweenness, PageRank, label propagation). I did not review its
+  API before deciding on the dependency set.
+- The graph crate depends on `serde` and `thiserror` only. Its errors are its own
+  `GraphError`, which the query layer maps onto `QueryError`.
+- Graph node ids are document ids. A graph match is joined to documents by id in the
+  `GraphMatch` plan node, which is the cross-index join. There is no general
+  `PlanNode::Join`, since no other input needs one yet.
+- `traverse` is provided as the free functions `bfs` and `dfs` rather than a method.
+  `MatchPattern`, `WhereClause`, and `ReturnClause` are folded into `GraphQuery`
+  fields. `GraphAnalytics` is a module of functions.
+- `shortest_path` is unweighted (BFS). Weighted paths (Dijkstra) are not built.
+- Variable-length hops use layered expansion with per-layer deduplication. This finds
+  reachable nodes, not every distinct path, so counts can differ from Cypher's
+  path semantics. Edge variables are parsed but not bound in results.
+- Community detection is deterministic label propagation. Louvain is not built.
+- Graphs live in the registry, next to their collection. They are not persisted by
+  the storage layer yet. The graph types derive `serde`, so persistence is a
+  follow-up.
+- `execute_streaming` is still a Phase 6 item.
+
+**Phase 3 test coverage:** the graph crate has 22 unit tests and 1 doctest (traversal
+order, filters, shortest paths, PageRank, betweenness, components, communities, pattern
+matching, parse errors, and the match cap). The query crate has 8 graph integration
+tests, which run `GRAPH("...")` through parse, plan, and execute. They cover joins to
+documents, variable-length hops, `LINEAR` and `INTERLEAVE` fusion with a scalar input,
+and error cases.
+
 ### tpt-search-graph
 
-- [ ] Scaffold `crates/tpt-search-graph/`
-- [ ] Wire deps: `tpt-search-core`, `tpt-math-graph`
-- [ ] Implement `PropertyGraph`, `Node`, `Edge`, `PropertyValue`
-- [ ] Implement `add_node` / `add_edge` / `get_node` / `get_edge` / `neighbors` / `traverse`
-- [ ] Implement `Direction`, `TraversalPattern`, `TraversalFilter`
-- [ ] Traversal engine: BFS, DFS, shortest path
-- [ ] Implement `GraphQuery`, `MatchPattern`, `NodePattern`, `EdgePattern`, `WhereClause`, `ReturnClause`, `OrderBy`
-- [ ] Implement `parse_graph_query` (Cypher-like grammar)
-- [ ] Implement `GraphAnalytics`: `shortest_path`, `betweenness_centrality`, `page_rank`,
-      `community_detection`, `connected_components` (reuse `tpt-math-graph` algorithms where they fit)
-- [ ] Unit tests + doctests
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Scaffold `crates/tpt-search-graph/`
+- [ ] Wire deps: `tpt-search-core`, `tpt-math-graph` — neither is wired (see notes)
+- [x] Implement `PropertyGraph`, `Node`, `Edge`, `PropertyValue`
+- [x] Implement `add_node` / `add_edge` / `get_node` / `get_edge` / `neighbors` (`traverse` is `bfs` / `dfs`)
+- [x] Implement `Direction`, `TraversalPattern`, `TraversalFilter`
+- [x] Traversal engine: BFS, DFS, shortest path
+- [x] Implement `GraphQuery`, `NodePattern`, `EdgePattern`, `OrderBy`, `Expr` (`MatchPattern`, `WhereClause`, `ReturnClause` folded into `GraphQuery`)
+- [x] Implement `parse_graph_query` (Cypher-style grammar subset)
+- [x] Implement `GraphAnalytics`: `shortest_path`, `betweenness_centrality`, `pagerank`, `label_propagation`, `connected_components` (in-crate; `tpt-math-graph` not used)
+- [x] Unit tests + doctests
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### tpt-search-query (graph + full hybrid integration)
 
-- [ ] Extend `Query` DSL with `Graph(GraphQuery)` variant
-- [ ] Complete `Hybrid { scalar, vector, graph, fusion }` — all three source types
-- [ ] Implement all three `FusionMethod`s: `ReciprocalRankFusion`, `LinearCombination`, `Interleaving`
-- [ ] Implement cross-index joins (scalar + vector + graph) in `PlanNode::Join`
-- [ ] Extend `QueryPlanner`/`QueryExecutor` with `GraphTraversal` and `Fusion` plan nodes
-- [ ] Unit tests + doctests for full hybrid queries
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Extend `Query` DSL with `Graph(GraphQuery)` variant (`GRAPH("MATCH ... RETURN ...")`)
+- [x] Complete `Hybrid { scalar, vector, graph, fusion }` — all three source types
+- [x] Implement all three `FusionMethod`s: `ReciprocalRankFusion`, `LinearCombination` (`LINEAR(w, ...)`), `Interleaving` (`INTERLEAVE`)
+- [x] Implement cross-index joins (scalar + vector + graph) — as the `GraphMatch` node's id join; no general `PlanNode::Join` (see notes)
+- [x] Extend `QueryPlanner`/`QueryExecutor` with `GraphMatch` (graph traversal) and `Fusion` plan nodes
+- [x] Unit tests + doctests for full hybrid queries
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### Phase 3 wrap-up
 
-- [ ] **Milestone check:** can traverse graphs and perform hybrid scalar+vector+graph queries
+- [x] **Milestone check:** can traverse graphs and perform hybrid scalar+vector+graph queries — covered by `crates/tpt-search-query/tests/graph.rs`, which fuses a `GRAPH(...)` input with scalar and vector inputs
 
 ---
 
@@ -287,28 +369,73 @@ shard management, leader-follower replication, query routing and scatter-gather,
 cluster management API.*
 *Milestone: can run a 3-node cluster with automatic failover and consistent reads.*
 
+**Phase 4 decisions and status** (recorded as built):
+- **Consensus is in-house, not openraft.** openraft 0.10 is MIT OR Apache-2.0, but four of
+  its dependencies are Apache-2.0-only (`anyerror`, `backoff-series`, `base2histogram`,
+  `display-more`), which `deny.toml` and spec.txt reject. The alternative checked was
+  `async-raft` 0.6.1. Its tree passes `deny.toml`, but it is unmaintained (last release
+  0.6.1), and it failed in testing: a follower reported a read against a committed write
+  that its state machine had not applied. The root cause was not isolated inside the
+  library. Rather than depend on it, the Raft protocol was written in-house
+  (`consensus/node.rs`), and the default dependency graph passes `cargo deny`.
+  deviation #3 ("wrap openraft") is superseded by this decision.
+- **Raft as implemented:** leader election with randomized timeouts; log replication
+  with consistency checks and backoff; commit only for entries of the leader's term; a
+  no-op entry at the start of each term; ReadIndex linearizable reads (a leader confirms
+  a majority before answering, and a follower waits to apply up to the index it was
+  given); one-voter-at-a-time membership changes, with new members catching up as
+  learners first.
+- **Sharding and replication are connected.** `ShardedCluster` runs one Raft group per
+  shard, placed by `ShardManager`. Writes and reads go to the owning shard. Searches run on
+  every shard and merge by score. A failed shard leader does not stop the other shards.
+- **Limits, all deliberate for this version:**
+  - Nothing is persisted. A restarted node has lost its term and vote, which breaks
+    Raft's safety rules, so there is no restart, only stop. Durability needs
+    `tpt-search-storage` wired in as the log and hard-state store.
+  - The log is never compacted and there are no snapshots. A new member replays the full
+    log from index 1.
+  - The transport is in-process. A stopped node fails calls after a short delay, which
+    stands in for a timeout on a real network.
+  - `ShardManager::rebalance` reports migrations, but no data is copied. Moving a shard
+    to a new replica set is not implemented.
+  - Range sharding exists in the placement code but has no shard-level tests beyond
+    routing.
+- Read and write retries run against a 10-second budget. A client that gets no leader in
+  that time receives an error.
+
+**Phase 4 test coverage:**
+- `tpt-search-distributed` unit tests and doctest: 14 unit tests (placement, migrations,
+  failover in scatter-gather, load balancing) and 1 doctest.
+- `tests/cluster.rs` (6): replication with linearizable reads on every node, deletes,
+  schema rejections agreed by every replica, leader failover, refusal to commit without
+  quorum, and add/remove node with catch-up.
+- `tests/consistency.rs` (4): acknowledged writes visible on every survivor right after
+  failover; two successive leader failures in five nodes; concurrent writers with a
+  leader killed mid-flight.
+- `tests/sharded.rs` (2): documents routed to one shard each, cross-shard search, and a
+  leader failure in one shard leaving the others serving.
+- Stress: the consensus tests passed 10 full runs in a row, and the concurrent-writer
+  test passed 20 runs in a row.
+
 ### tpt-search-distributed
 
-- [ ] Scaffold `crates/tpt-search-distributed/`
-- [ ] Wire deps: `tpt-search-core`, `tpt-search-storage`, `openraft` (MIT — deviation #3)
-- [ ] Wrap `openraft`: adapt `RaftNode`/`RaftState`/`RaftMessage` surface onto openraft's
-      types, `propose` / `tick` wiring, storage + network trait impls backed by `tpt-search-storage`
-- [ ] Implement `ShardManager`, `ShardInfo`, `ShardingStrategy` (Hash / Range / Custom)
-- [ ] Implement `route_query` / `route_document` / `rebalance` (+ `ShardMigration`)
-- [ ] Leader-follower replication on top of openraft's log replication
-- [ ] Implement `QueryRouter` (`route` / `scatter_gather`), `LoadBalancer`
-      (RoundRobin / LeastConnections / Random / Weighted)
-- [ ] Cluster management API surface (add/remove node, status, health)
-- [ ] Unit tests + doctests
-- [ ] Integration test: 3-node cluster, kill the leader mid-test, verify automatic
-      failover and consistent reads afterward
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Scaffold `crates/tpt-search-distributed/`
+- [ ] Wire deps: `tpt-search-core`, `tpt-search-storage`, `openraft` — `tpt-search-core` and `tpt-search-index` wired; `tpt-search-storage` not used yet (no durability); `openraft` replaced by an in-house Raft (see decisions)
+- [x] Implement `ShardManager`, `ShardInfo`, `ShardingStrategy` (Hash / Range; Custom not built)
+- [x] Implement `route_document` / `route_query` / `rebalance` (+ `ShardMigration`; migrations are reported, not copied)
+- [x] Consensus layer: in-house Raft (`consensus/node.rs`), replacing the openraft wrapper of deviation #3
+- [x] Leader-follower replication on the Raft log, one Raft group per shard (`ShardedCluster`)
+- [x] Implement `QueryRouter` (`route_document` / `scatter_gather`, with failover between replicas), `LoadBalancer` (RoundRobin / LeastConnections / Random / Weighted)
+- [x] Cluster management API surface (start, initialize, add/remove node, stop, status, health via `has_quorum`)
+- [x] Unit tests + doctests
+- [x] Integration test: 3-node cluster, kill the leader mid-test, verify automatic failover and consistent reads afterward
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean (workspace, including `--all-features`)
+- [x] `cargo deny check` clean (the default dependency graph, which now includes the in-house Raft and no openraft)
 
 ### Phase 4 wrap-up
 
-- [ ] **Milestone check:** 3-node cluster with automatic failover and consistent reads
+- [x] **Milestone check:** 3-node cluster with automatic failover and consistent reads (in-process, in-memory; durability is a follow-up)
 
 ---
 
