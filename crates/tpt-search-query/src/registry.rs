@@ -33,6 +33,12 @@ impl IndexRegistry {
         Ok(())
     }
 
+    /// Removes a collection and its graph. Returns whether a collection was removed.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.graphs.remove(name);
+        self.collections.remove(name).is_some()
+    }
+
     /// Looks up a collection.
     pub fn get(&self, name: &str) -> Option<&Collection> {
         self.collections.get(name)

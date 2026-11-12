@@ -449,3 +449,51 @@ fn sort_rows(rows: &mut [u32], keys: &[SortKey], hits: &Hits, collection: &Colle
         a.cmp(&b)
     });
 }
+
+/// Documents of a query delivered in batches. Created by
+/// [`QueryExecutor::execute_streaming`].
+pub struct StreamedResult {
+    /// Matches before any limit.
+    pub total_hits: usize,
+    /// Highlight spans per document id.
+    pub highlights: HashMap<DocumentId, Vec<Highlight>>,
+    /// Time spent evaluating the plan, in milliseconds.
+    pub took_ms: u64,
+    documents: std::vec::IntoIter<Document>,
+    batch_size: usize,
+}
+
+impl Iterator for StreamedResult {
+    type Item = Vec<Document>;
+
+    fn next(&mut self) -> Option<Vec<Document>> {
+        let batch: Vec<Document> = self.documents.by_ref().take(self.batch_size).collect();
+        if batch.is_empty() {
+            None
+        } else {
+            Some(batch)
+        }
+    }
+}
+
+impl QueryExecutor<'_> {
+    /// Runs a plan and returns its documents in batches of `batch_size`.
+    ///
+    /// Ranking and limits need every match, so the plan is fully evaluated first. What
+    /// streaming bounds is the size of each piece handed to the caller, not the work done
+    /// to produce them. `batch_size` of zero is treated as one.
+    pub fn execute_streaming(
+        &self,
+        plan: &QueryPlan,
+        batch_size: usize,
+    ) -> Result<StreamedResult, QueryError> {
+        let result = self.execute(plan)?;
+        Ok(StreamedResult {
+            total_hits: result.total_hits,
+            highlights: result.highlights,
+            took_ms: result.took_ms,
+            documents: result.documents.into_iter(),
+            batch_size: batch_size.max(1),
+        })
+    }
+}
