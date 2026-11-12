@@ -101,7 +101,10 @@ impl ProductQuantizer {
         let mut state = seed;
         let subquantizers = (0..m)
             .map(|s| {
-                let points: Vec<&[f32]> = data.iter().map(|v| &v[s * sub_dim..(s + 1) * sub_dim]).collect();
+                let points: Vec<&[f32]> = data
+                    .iter()
+                    .map(|v| &v[s * sub_dim..(s + 1) * sub_dim])
+                    .collect();
                 Subquantizer {
                     sub_dim,
                     centroids: kmeans(&points, k.min(points.len()), sub_dim, iters, &mut state),
@@ -393,10 +396,13 @@ mod tests {
             assert_eq!(codes.len(), 4);
             let back = pq.decode(&codes).unwrap();
             total_err += squared_l2(v, &back);
-            total_norm += squared_l2(v, &vec![0.0; 8]);
+            total_norm += squared_l2(v, &[0.0; 8]);
         }
         // Reconstruction should be much better than the zero vector.
-        assert!(total_err < 0.5 * total_norm, "err {total_err} norm {total_norm}");
+        assert!(
+            total_err < 0.5 * total_norm,
+            "err {total_err} norm {total_norm}"
+        );
     }
 
     #[test]
@@ -416,8 +422,14 @@ mod tests {
     #[test]
     fn product_quantizer_validates_inputs() {
         let data = points(10, 6);
-        assert!(ProductQuantizer::train(&data, 4, 8, 1, 0).is_err(), "6 not divisible by 4");
-        assert!(ProductQuantizer::train(&data, 2, 300, 1, 0).is_err(), "k too large");
+        assert!(
+            ProductQuantizer::train(&data, 4, 8, 1, 0).is_err(),
+            "6 not divisible by 4"
+        );
+        assert!(
+            ProductQuantizer::train(&data, 2, 300, 1, 0).is_err(),
+            "k too large"
+        );
         assert!(ProductQuantizer::train(&[], 2, 8, 1, 0).is_err());
     }
 

@@ -140,7 +140,7 @@ mod scalar {
 mod x86 {
     use std::arch::x86_64::*;
 
-    /// Reduces 8 lanes to one sum.
+    /// Sums the eight lanes of a 256-bit register.
     #[target_feature(enable = "avx2")]
     unsafe fn hsum(v: __m256) -> f32 {
         let lo = _mm256_castps256_ps128(v);
@@ -152,70 +152,54 @@ mod x86 {
         _mm_cvtss_f32(_mm_add_ss(sums, shuf))
     }
 
-    /// Applies `lane` to each 8-wide block and `tail` to the remainder.
-    #[target_feature(enable = "avx2")]
-    unsafe fn reduce(
-        a: &[f32],
-        b: &[f32],
-        lane: unsafe fn(__m256, __m256) -> __m256,
-        tail: fn(f32, f32) -> f32,
-    ) -> f32 {
-        let n = a.len().min(b.len());
-        let mut acc = _mm256_setzero_ps();
-        let mut i = 0;
-        while i + 8 <= n {
-            // SAFETY: i + 8 <= n <= both lengths, so both loads are in bounds.
-            let va = _mm256_loadu_ps(a.as_ptr().add(i));
-            let vb = _mm256_loadu_ps(b.as_ptr().add(i));
-            acc = _mm256_add_ps(acc, lane(va, vb));
-            i += 8;
-        }
-        let mut sum = hsum(acc);
-        while i < n {
-            sum += tail(a[i], b[i]);
-            i += 1;
-        }
-        sum
+    macro_rules! kernel {
+        ($name:ident, |$va:ident, $vb:ident| $lane:expr, |$x:ident, $y:ident| $tail:expr) => {
+            /// # Safety
+            /// The CPU must support AVX2.
+            #[target_feature(enable = "avx2")]
+            pub unsafe fn $name(a: &[f32], b: &[f32]) -> f32 {
+                let n = a.len().min(b.len());
+                let mut acc = _mm256_setzero_ps();
+                let mut i = 0;
+                while i + 8 <= n {
+                    // SAFETY: i + 8 <= n <= both lengths, so both loads are in bounds.
+                    let $va = _mm256_loadu_ps(a.as_ptr().add(i));
+                    let $vb = _mm256_loadu_ps(b.as_ptr().add(i));
+                    acc = _mm256_add_ps(acc, $lane);
+                    i += 8;
+                }
+                let mut sum = hsum(acc);
+                while i < n {
+                    let ($x, $y) = (a[i], b[i]);
+                    sum += $tail;
+                    i += 1;
+                }
+                sum
+            }
+        };
     }
 
-    #[target_feature(enable = "avx2")]
-    unsafe fn dot_lane(va: __m256, vb: __m256) -> __m256 {
-        _mm256_mul_ps(va, vb)
-    }
-
-    #[target_feature(enable = "avx2")]
-    unsafe fn sq_lane(va: __m256, vb: __m256) -> __m256 {
-        let d = _mm256_sub_ps(va, vb);
-        _mm256_mul_ps(d, d)
-    }
-
-    #[target_feature(enable = "avx2")]
-    unsafe fn abs_lane(va: __m256, vb: __m256) -> __m256 {
-        let d = _mm256_sub_ps(va, vb);
-        let sign = _mm256_set1_ps(-0.0);
-        _mm256_andnot_ps(sign, d)
-    }
-
-    /// # Safety
-    /// The CPU must support AVX2.
-    pub unsafe fn dot(a: &[f32], b: &[f32]) -> f32 {
-        reduce(a, b, dot_lane, |x, y| x * y)
-    }
-
-    /// # Safety
-    /// The CPU must support AVX2.
-    pub unsafe fn squared_l2(a: &[f32], b: &[f32]) -> f32 {
-        reduce(a, b, sq_lane, |x, y| {
+    kernel!(dot, |va, vb| _mm256_mul_ps(va, vb), |x, y| x * y);
+    kernel!(
+        squared_l2,
+        |va, vb| {
+            let d = _mm256_sub_ps(va, vb);
+            _mm256_mul_ps(d, d)
+        },
+        |x, y| {
             let d = x - y;
             d * d
-        })
-    }
-
-    /// # Safety
-    /// The CPU must support AVX2.
-    pub unsafe fn manhattan(a: &[f32], b: &[f32]) -> f32 {
-        reduce(a, b, abs_lane, |x, y| (x - y).abs())
-    }
+        }
+    );
+    kernel!(
+        manhattan,
+        |va, vb| {
+            // Clearing the sign bit gives |a - b|.
+            let d = _mm256_sub_ps(va, vb);
+            _mm256_andnot_ps(_mm256_set1_ps(-0.0), d)
+        },
+        |x, y| (x - y).abs()
+    );
 }
 
 #[cfg(target_arch = "aarch64")]
@@ -223,71 +207,46 @@ mod x86 {
 mod arm {
     use std::arch::aarch64::*;
 
-    /// Applies `lane` to each 4-wide block and `tail` to the remainder.
-    ///
-    /// # Safety
-    /// NEON must be available (always true on aarch64).
-    #[target_feature(enable = "neon")]
-    unsafe fn reduce(
-        a: &[f32],
-        b: &[f32],
-        lane: unsafe fn(float32x4_t, float32x4_t) -> float32x4_t,
-        tail: fn(f32, f32) -> f32,
-    ) -> f32 {
-        let n = a.len().min(b.len());
-        let mut acc = vdupq_n_f32(0.0);
-        let mut i = 0;
-        while i + 4 <= n {
-            // SAFETY: i + 4 <= n <= both lengths, so both loads are in bounds.
-            let va = vld1q_f32(a.as_ptr().add(i));
-            let vb = vld1q_f32(b.as_ptr().add(i));
-            acc = vaddq_f32(acc, lane(va, vb));
-            i += 4;
-        }
-        let mut sum = vaddvq_f32(acc);
-        while i < n {
-            sum += tail(a[i], b[i]);
-            i += 1;
-        }
-        sum
+    macro_rules! kernel {
+        ($name:ident, |$va:ident, $vb:ident| $lane:expr, |$x:ident, $y:ident| $tail:expr) => {
+            /// # Safety
+            /// NEON must be available (always true on aarch64).
+            #[target_feature(enable = "neon")]
+            pub unsafe fn $name(a: &[f32], b: &[f32]) -> f32 {
+                let n = a.len().min(b.len());
+                let mut acc = vdupq_n_f32(0.0);
+                let mut i = 0;
+                while i + 4 <= n {
+                    // SAFETY: i + 4 <= n <= both lengths, so both loads are in bounds.
+                    let $va = vld1q_f32(a.as_ptr().add(i));
+                    let $vb = vld1q_f32(b.as_ptr().add(i));
+                    acc = vaddq_f32(acc, $lane);
+                    i += 4;
+                }
+                let mut sum = vaddvq_f32(acc);
+                while i < n {
+                    let ($x, $y) = (a[i], b[i]);
+                    sum += $tail;
+                    i += 1;
+                }
+                sum
+            }
+        };
     }
 
-    #[target_feature(enable = "neon")]
-    unsafe fn dot_lane(va: float32x4_t, vb: float32x4_t) -> float32x4_t {
-        vmulq_f32(va, vb)
-    }
-
-    #[target_feature(enable = "neon")]
-    unsafe fn sq_lane(va: float32x4_t, vb: float32x4_t) -> float32x4_t {
-        let d = vsubq_f32(va, vb);
-        vmulq_f32(d, d)
-    }
-
-    #[target_feature(enable = "neon")]
-    unsafe fn abs_lane(va: float32x4_t, vb: float32x4_t) -> float32x4_t {
-        vabdq_f32(va, vb)
-    }
-
-    /// # Safety
-    /// NEON must be available (always true on aarch64).
-    pub unsafe fn dot(a: &[f32], b: &[f32]) -> f32 {
-        reduce(a, b, dot_lane, |x, y| x * y)
-    }
-
-    /// # Safety
-    /// NEON must be available (always true on aarch64).
-    pub unsafe fn squared_l2(a: &[f32], b: &[f32]) -> f32 {
-        reduce(a, b, sq_lane, |x, y| {
+    kernel!(dot, |va, vb| vmulq_f32(va, vb), |x, y| x * y);
+    kernel!(
+        squared_l2,
+        |va, vb| {
+            let d = vsubq_f32(va, vb);
+            vmulq_f32(d, d)
+        },
+        |x, y| {
             let d = x - y;
             d * d
-        })
-    }
-
-    /// # Safety
-    /// NEON must be available (always true on aarch64).
-    pub unsafe fn manhattan(a: &[f32], b: &[f32]) -> f32 {
-        reduce(a, b, abs_lane, |x, y| (x - y).abs())
-    }
+        }
+    );
+    kernel!(manhattan, |va, vb| vabdq_f32(va, vb), |x, y| (x - y).abs());
 }
 
 #[cfg(test)]
@@ -313,8 +272,14 @@ mod tests {
             let a = sample(len, 1);
             let b = sample(len, 7);
             assert!(close(dot(&a, &b), scalar::dot(&a, &b)), "dot len {len}");
-            assert!(close(squared_l2(&a, &b), scalar::squared_l2(&a, &b)), "l2 len {len}");
-            assert!(close(manhattan(&a, &b), scalar::manhattan(&a, &b)), "l1 len {len}");
+            assert!(
+                close(squared_l2(&a, &b), scalar::squared_l2(&a, &b)),
+                "l2 len {len}"
+            );
+            assert!(
+                close(manhattan(&a, &b), scalar::manhattan(&a, &b)),
+                "l1 len {len}"
+            );
         }
     }
 
@@ -340,16 +305,25 @@ mod tests {
             DistanceMetric::Euclidean,
             DistanceMetric::Manhattan,
         ] {
-            assert!(distance(metric, &q, &near) < distance(metric, &q, &far), "{metric:?}");
+            assert!(
+                distance(metric, &q, &near) < distance(metric, &q, &far),
+                "{metric:?}"
+            );
         }
         // Dot product: larger dot is closer.
-        assert!(distance(DistanceMetric::DotProduct, &q, &near) < distance(DistanceMetric::DotProduct, &q, &far));
+        assert!(
+            distance(DistanceMetric::DotProduct, &q, &near)
+                < distance(DistanceMetric::DotProduct, &q, &far)
+        );
     }
 
     #[test]
     fn scores_are_larger_for_closer_vectors() {
         let s = score_from_distance(DistanceMetric::Euclidean, 4.0);
         assert!(close(s, -2.0));
-        assert!(close(score_from_distance(DistanceMetric::Cosine, 0.25), 0.75));
+        assert!(close(
+            score_from_distance(DistanceMetric::Cosine, 0.25),
+            0.75
+        ));
     }
 }

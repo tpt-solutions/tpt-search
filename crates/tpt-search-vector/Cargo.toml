@@ -21,3 +21,7 @@ all = "warn"
 [dev-dependencies]
 criterion = "0.7.0"
 proptest = "1.11.0"
+
+[[bench]]
+name = "vector_bench"
+harness = false
