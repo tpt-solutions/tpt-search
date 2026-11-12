@@ -1,0 +1,29 @@
+[package]
+name = "tpt-search-py"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords = ["python", "pyo3", "bindings", "search", "extension-module"]
+categories = ["api-bindings", "development-tools::ffi"]
+description = "Python bindings for tpt-search (PyO3 extension module named tpt_search)"
+publish = false
+
+[lib]
+name = "tpt_search"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+pyo3 = { version = "0.25", features = ["extension-module"] }
+serde_json = "1.0.154"
+tpt-search-api = { version = "0.1.0", path = "../tpt-search-api" }
+tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
+tpt-search-index = { version = "0.1.0", path = "../tpt-search-index" }
+tpt-search-query = { version = "0.1.0", path = "../tpt-search-query" }
+
+[lints]
+workspace = true

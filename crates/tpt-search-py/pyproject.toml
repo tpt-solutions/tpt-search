@@ -1,0 +1,20 @@
+[build-system]
+requires = ["maturin>=1.9,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "tpt-search"
+version = "0.1.0"
+description = "Python bindings for tpt-search, a hybrid search engine (text, vectors, graphs)."
+requires-python = ">=3.9"
+license = { text = "MIT OR Apache-2.0" }
+classifiers = [
+    "Programming Language :: Rust",
+    "Programming Language :: Python :: Implementation :: CPython",
+    "Operating System :: OS Independent",
+]
+
+[tool.maturin]
+module-name = "tpt_search"
+manifest-path = "Cargo.toml"
+features = ["pyo3/extension-module"]
