@@ -446,28 +446,61 @@ synchronization, offline queue with replay, bandwidth-aware sync, sync monitorin
 *Milestone: can sync data between edge devices and cloud with offline capability
 and automatic conflict resolution.*
 
+**Phase 5 decisions and status** (recorded as built):
+- **Conflicts are resolved per field, by last writer wins.** Stamps are Lamport clocks
+  with the replica id as tie-breaker, so every replica picks the same winner. Writes to
+  different fields never conflict. Deletes are stamped too, so a later edit revives a
+  document.
+- **Conflict counts are observations, not events.** `SyncReport::conflicts` counts an
+  incoming write from another replica that disagrees with the local value of the same
+  field. Each replica that applies one side of a conflicting pair observes it, so one
+  conflict can count on several replicas. The monitor reports the sum.
+- **Offline queue is the WAL.** Each local entry and each upstream acknowledgement is
+  written to a `tpt-search-storage` WAL before it counts. This needed a new
+  `WalEntry::Opaque` variant in storage, which is the only change to that crate.
+  Acknowledged entries are not removed from the log. It keeps full history, so the log
+  grows without bound until compaction exists.
+- **Sync is delta-based.** Version vectors give each replica's highest applied sequence
+  number. A peer receives exactly the entries its version vector lacks. Entries from one
+  replica are applied in sequence order. A gap that never fills is reported as an error,
+  not applied.
+- **Bandwidth.** The planner groups entries by replica and sends whole prefixes, so a
+  replica's later entries wait behind any entry that does not fit. Replicas with
+  priority-field or delete entries go first. Compression is DEFLATE through `flate2`.
+  The caller supplies link state. The crate does not measure it.
+- **Standalone CRDTs.** `GCounter`, `PnCounter`, and `OrSet` are implemented and tested,
+  but the sync engine replicates only `LwwDocument`. Counter and set fields are not yet
+  replicated.
+- **Not built:** causal ordering beyond Lamport clocks (concurrency is inferred from
+  replica disagreement, not from vector clocks), log compaction, and multi-upstream
+  acknowledgement.
+
+**Phase 5 test coverage:** 15 unit tests and 1 doctest (CRDT laws, delta selection,
+gap handling, bandwidth planning, compression, and a conflict case); 3 integration tests
+(an offline cycle with a restart that keeps the queue, a conflicting edit, convergence,
+and monitor totals; a budgeted upload that defers and then drains; deletes and revival);
+and 1 randomized convergence test that runs 60 seeds of random edits and exchanges across
+three replicas. The `sync_report` example prints the CLI report.
+
 ### tpt-search-sync
 
-- [ ] Scaffold `crates/tpt-search-sync/`
-- [ ] Wire deps: `tpt-search-core`, `tpt-search-storage`
-- [ ] Implement `CrdtDocument`, `LwwDocument` (+ `merge`), `OrSetDocument`, `GCounter`, `PnCounter`
-- [ ] Implement `SyncEngine` (`sync` / `get_delta` / `apply_delta` / `resolve_conflicts`)
-- [ ] Implement `SyncLog`, `SyncEntry`, `SyncOperation`, `SyncReport`
-- [ ] Offline queue with replay (persisted via `tpt-search-storage`'s WAL)
-- [ ] Implement `BandwidthManager` (`should_sync` / `compress_delta` / `prioritize`), `SyncPriority`
-- [ ] Minimal sync-monitoring surface — a CLI report (pushed/pulled/conflicts/errors);
-      no dedicated UI framework in this phase
-- [ ] Unit tests + doctests
-- [ ] Integration test: simulate an offline/online sync cycle with conflicting edits,
-      verify automatic conflict resolution
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Scaffold `crates/tpt-search-sync/`
+- [x] Wire deps: `tpt-search-core`, `tpt-search-storage` (WAL for the offline queue)
+- [x] Implement `LwwDocument` (+ `merge`), `OrSet`, `GCounter`, `PnCounter` (`CrdtDocument` trait; `CrdtDocument` is the trait, `OrSetDocument` is named `OrSet`)
+- [x] Implement `SyncEngine` (`exchange` / `delta_for` / `apply_delta` / `upload` / `download`; conflict resolution is last-writer-wins inside `LwwDocument::merge`, with no separate `resolve_conflicts` step)
+- [x] Implement `SyncEntry`, `Change` (the operation), `SyncReport`; the log is an internal `Vec<SyncEntry>`, not a public `SyncLog` type
+- [x] Offline queue with replay (persisted via `tpt-search-storage`'s WAL; `SyncEngine::open` replays it)
+- [x] Implement `BandwidthManager` (`should_sync` / `compress` / `decompress` / `plan` / `priority`), `SyncPriority`, `LinkState`
+- [x] Minimal sync-monitoring surface: `SyncMonitor::render` and the `sync_report` example (applied/conflicts/duplicates/deferred/bytes/errors)
+- [x] Unit tests + doctests
+- [x] Integration test: an offline/online sync cycle with conflicting edits, verifying automatic conflict resolution (`tests/offline_sync.rs`)
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### Phase 5 wrap-up
 
-- [ ] **Milestone check:** sync between edge devices and cloud with offline capability
-      and automatic conflict resolution
+- [x] **Milestone check:** sync between edge devices and cloud with offline capability and automatic conflict resolution
 
 ---
 
@@ -479,36 +512,44 @@ cost-based query planner, docs/examples, performance tuning and production harde
 
 ### tpt-search-api
 
-- [ ] Scaffold `crates/tpt-search-api/`
-- [ ] Wire deps: `tpt-search-query`, `tpt-search-distributed`, `axum` (use under MIT),
-      `tonic` (use under MIT), `async-graphql` (use under MIT, for the `/graphql` route)
-- [ ] Implement REST routes: `search`, `create_index`, `index_document`, `get_document`,
-      `delete_document`, `graphql`, `stream_results`
-- [ ] Implement `SearchRequest`/response types, highlight config wiring
-- [ ] Implement gRPC `SearchService` trait + `SearchGrpcService` (proto via `tonic-build`)
-- [ ] Implement WebSocket real-time subscriptions (axum ws upgrade)
-- [ ] Implement `SchemaRegistry` and index-lifecycle endpoints
-- [ ] Unit tests + integration tests (HTTP + gRPC + WS) for the full API surface
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Scaffold `crates/tpt-search-api/`
+- [~] Wire deps. Built on `hyper` 1 directly, not `axum`/`tonic`/`async-graphql`: all three
+      fail `deny.toml` (sync_wrapper, ryu via serde_urlencoded, MPL-2.0 and Apache-only
+      transitive crates). `tpt-search-distributed` is not wired in yet.
+- [x] Implement REST routes: create/list/drop index, schema, upsert/get/delete document,
+      search, streamed (NDJSON) search. The `/graphql` route is blocked by the license policy.
+- [x] Implement request/response types (`SearchRequest` shape, highlight spans in hits)
+- [ ] gRPC `SearchService` — blocked: `tonic` fails the license policy
+- [x] WebSocket real-time subscriptions (hand-rolled RFC 6455 handshake and text frames)
+- [x] Schema and index-lifecycle endpoints (`PUT`/`GET`/`DELETE /indexes/{name}`)
+- [x] Unit tests (`convert`, `ws`) and integration tests (`tests/api.rs`, 7 tests) for the
+      HTTP and WebSocket surface. gRPC tests are not applicable.
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check licenses` clean
 
 ### tpt-search-query (cost-based optimizer)
 
-- [ ] Implement `IndexStatistics` collection
-- [ ] Implement `QueryPlanner.optimize()` — cost-based plan rewriting using `IndexStatistics`
-- [ ] Implement `QueryExecutor.execute_streaming()`
-- [ ] Unit tests + doctests for optimizer decisions (plan selection under varying stats)
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [~] Implement `IndexStatistics` collection. No separate type: the optimizer reads the
+      live posting-list and cardinality estimates from the collection, so statistics follow
+      the data without a refresh step.
+- [x] Implement `QueryPlanner.optimize()` — reorders intersections by estimated cardinality,
+      short-circuits empty branches, flattens and de-duplicates unions, drops no-op differences
+- [x] Implement `QueryExecutor.execute_streaming()` (batches, zero batch size handled)
+- [x] Unit tests for optimizer decisions (`tests/optimizer.rs`, 5 tests). Doctests not added.
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check licenses` clean
 
 ### Polish
 
-- [ ] Comprehensive documentation pass (rustdoc + `examples/` across all crates)
-- [ ] Performance tuning pass (profiling, hot-path optimization)
-- [ ] Production hardening: resource limits, graceful shutdown, error-handling audit
-- [ ] Load/perf testing harness
+- [~] Comprehensive documentation pass (rustdoc + `examples/` across all crates). Rustdoc
+      builds with `-D warnings`; examples exist for api, sync and vector; not every crate has one.
+- [~] Performance tuning pass. Hot paths tuned (SIMD distance kernels, monomorphic loops, HNSW
+      heuristic). Uniform-random 128-d recall is still open; see the Phase 2 notes.
+- [x] Production hardening: query timeouts and candidate limits, request body limits with
+      drain, query-length and depth limits in the parser, graceful shutdown via watch channel
+- [x] Load/perf testing harness (`tpt-search-api/examples/load.rs`, criterion benches)
 
 ### Phase 6 wrap-up
 
@@ -522,12 +563,24 @@ cost-based query planner, docs/examples, performance tuning and production harde
 community outreach and adoption.*
 *Milestone: drop-in replacement for Elasticsearch in Rust, Python, Go, and C++ ecosystems.*
 
-- [ ] Scaffold `crates/tpt-search-capi/` — C API via `cbindgen`
-- [ ] Unit/smoke tests for the C API; rustdoc; `cargo fmt` / `clippy` / `deny` clean
-- [ ] Scaffold `crates/tpt-search-py/` — Python bindings via `pyo3`
-- [ ] Python-side tests (pytest); packaging (maturin) config
-- [ ] Go bindings over `tpt-search-capi` (cgo)
-- [ ] Go-side tests and example usage
+- [x] Scaffold `crates/tpt-search-capi/` — C ABI as a `cdylib`. Written by hand, not via
+      `cbindgen`: its MPL-2.0 build dependencies fail `deny.toml`. The header is
+      `include/tpt_search.h`.
+- [x] Rust tests for the C API (`tests/capi.rs`, 11 tests) and rustdoc. Clippy and
+      `cargo deny` clean. The C header is not compiled here: no C compiler is installed.
+- [x] Python bindings: `crates/tpt-search-py/` (PyO3 0.25, module `tpt_search`, maturin
+      `pyproject.toml`). `Engine` plus typed exceptions. The license exception for
+      `target-lexicon` (build-time dependency of pyo3-build-config) is scoped in `deny.toml`,
+      approved by the maintainer.
+- [x] Python tests: `tests/test_engine.py` (17 tests) pass against the wheel installed in a
+      fresh virtualenv. `python/test_tpt_search.py` in the C API crate (11 tests) drives the C ABI through `ctypes`.
+- [ ] Python packaging: wheel builds locally (`maturin build`). Publishing to PyPI is not
+      done and needs confirmation.
+- [x] Go bindings: `bindings/go/` (package `tpt`, cgo over `tpt-search-capi`). `Engine` with
+      typed sentinel errors; thread-local error read on the locked OS thread.
+- [x] Go tests: `tpt_test.go` (9 tests, including concurrent searches), passing under `-race`
+      with MinGW gcc and the `x86_64-pc-windows-gnu` build of the library. Build steps are in `bindings/go/README.md`.
+- [ ] Go example usage (`example_test.go`) and a non-Windows run; only Windows has been exercised.
 - [ ] Integration examples for TPT verticals: healthcare, police, aviation, robotics
 - [ ] `CONTRIBUTING.md`, `SECURITY.md`, community-facing docs pass
 - [ ] Publish crates to crates.io (workspace-wide version bump + release checklist)
