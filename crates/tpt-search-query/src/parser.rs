@@ -23,6 +23,7 @@ use std::ops::Bound;
 use tpt_search_core::{FieldValue, QueryError};
 
 use crate::ast::{FusionMethod, Query};
+use tpt_search_graph::parse_graph_query;
 
 /// Maximum accepted query length in bytes.
 pub const MAX_QUERY_BYTES: usize = 64 * 1024;
@@ -367,7 +368,27 @@ impl Parser {
             Tok::Ident(name) if name.eq_ignore_ascii_case("KNN") && *self.peek() == Tok::LParen => {
                 self.parse_knn()
             }
-            Tok::Ident(name) if name.eq_ignore_ascii_case("HYBRID") && *self.peek() == Tok::LParen => {
+            Tok::Ident(name)
+                if name.eq_ignore_ascii_case("GRAPH") && *self.peek() == Tok::LParen =>
+            {
+                self.advance();
+                let text = match self.advance() {
+                    Tok::Str(s) => s,
+                    other => {
+                        return Err(parse_err(format!(
+                            "GRAPH needs a quoted pattern but found {}",
+                            other.describe()
+                        )))
+                    }
+                };
+                self.expect(&Tok::RParen)?;
+                let graph =
+                    parse_graph_query(&text).map_err(|e| QueryError::ParseError(e.to_string()))?;
+                Ok(Query::Graph(graph))
+            }
+            Tok::Ident(name)
+                if name.eq_ignore_ascii_case("HYBRID") && *self.peek() == Tok::LParen =>
+            {
                 self.parse_hybrid()
             }
             Tok::Ident(field) => {
@@ -443,6 +464,7 @@ impl Parser {
         self.expect(&Tok::LParen)?;
         let mut scalar = None;
         let mut vector = None;
+        let mut graph = None;
         let mut fusion = FusionMethod::default();
         loop {
             let name = self.field_name()?;
@@ -455,6 +477,15 @@ impl Parser {
                         return Err(parse_err("HYBRID vector input must be a KNN(...) query"));
                     }
                     vector = Some(Box::new(q));
+                }
+                "graph" => {
+                    let q = self.parse_primary()?;
+                    if !matches!(q, Query::Graph(_)) {
+                        return Err(parse_err(
+                            "HYBRID graph input must be a GRAPH(\"...\") query",
+                        ));
+                    }
+                    graph = Some(Box::new(q));
                 }
                 "fusion" => fusion = self.fusion()?,
                 other => return Err(parse_err(format!("unknown HYBRID argument `{other}`"))),
@@ -470,23 +501,44 @@ impl Parser {
                 }
             }
         }
-        if scalar.is_none() && vector.is_none() {
+        if scalar.is_none() && vector.is_none() && graph.is_none() {
             return Err(parse_err("HYBRID needs a scalar or vector input"));
         }
         Ok(Query::Hybrid {
             scalar,
             vector,
+            graph,
             fusion,
         })
     }
 
-    /// `RRF(k=N)`, with `k` optional (default 60).
+    /// `RRF(k=N)`, `LINEAR(w1, w2, ...)`, or `INTERLEAVE`.
     fn fusion(&mut self) -> Result<FusionMethod, QueryError> {
         let name = self.field_name()?;
+        if name.eq_ignore_ascii_case("INTERLEAVE") {
+            return Ok(FusionMethod::Interleaving);
+        }
+        self.expect(&Tok::LParen)?;
+        if name.eq_ignore_ascii_case("LINEAR") {
+            let mut weights = Vec::new();
+            loop {
+                weights.push(self.number()?);
+                match self.advance() {
+                    Tok::Comma => continue,
+                    Tok::RParen => break,
+                    other => {
+                        return Err(parse_err(format!(
+                            "expected ',' or ')' in LINEAR but found {}",
+                            other.describe()
+                        )))
+                    }
+                }
+            }
+            return Ok(FusionMethod::LinearCombination { weights });
+        }
         if !name.eq_ignore_ascii_case("RRF") {
             return Err(parse_err(format!("unknown fusion method `{name}`")));
         }
-        self.expect(&Tok::LParen)?;
         let mut k = 60;
         if *self.peek() != Tok::RParen {
             let arg = self.field_name()?;
@@ -498,6 +550,17 @@ impl Parser {
         }
         self.expect(&Tok::RParen)?;
         Ok(FusionMethod::ReciprocalRankFusion { k })
+    }
+
+    fn number(&mut self) -> Result<f32, QueryError> {
+        match self.advance() {
+            Tok::Int(n) => Ok(n as f32),
+            Tok::Float(f) => Ok(f as f32),
+            other => Err(parse_err(format!(
+                "expected a number but found {}",
+                other.describe()
+            ))),
+        }
     }
 
     fn positive_int(&mut self) -> Result<usize, QueryError> {

@@ -2,8 +2,8 @@
 //! parse, plan, and execute path.
 
 use tpt_search_core::{Analyzer, Document, FieldSchema, FieldType, QueryError, Schema};
-use tpt_search_query::{parse_query, IndexRegistry, PlanNode, Query, QueryExecutor, QueryPlanner};
 use tpt_search_query::ast::FusionMethod;
+use tpt_search_query::{parse_query, IndexRegistry, PlanNode, Query, QueryExecutor, QueryPlanner};
 
 fn schema() -> Schema {
     Schema::new("docs", "id")
@@ -32,10 +32,14 @@ fn registry() -> IndexRegistry {
     let mut registry = IndexRegistry::new();
     registry.create("docs", schema()).unwrap();
     let c = registry.get_mut("docs").unwrap();
-    c.upsert(&doc("d1", "rust search engine", 2022, [1.0, 0.0])).unwrap();
-    c.upsert(&doc("d2", "vector search tutorial", 2019, [0.9, 0.1])).unwrap();
-    c.upsert(&doc("d3", "cooking pasta", 2023, [0.0, 1.0])).unwrap();
-    c.upsert(&doc("d4", "rust vector database", 2024, [0.7, 0.7])).unwrap();
+    c.upsert(&doc("d1", "rust search engine", 2022, [1.0, 0.0]))
+        .unwrap();
+    c.upsert(&doc("d2", "vector search tutorial", 2019, [0.9, 0.1]))
+        .unwrap();
+    c.upsert(&doc("d3", "cooking pasta", 2023, [0.0, 1.0]))
+        .unwrap();
+    c.upsert(&doc("d4", "rust vector database", 2024, [0.7, 0.7]))
+        .unwrap();
     registry
 }
 
@@ -44,7 +48,11 @@ fn run(registry: &IndexRegistry, text: &str) -> Result<Vec<String>, tpt_search_c
     let query = parse_query(text)?;
     let plan = QueryPlanner::new().plan("docs", registry.get("docs").unwrap(), &query)?;
     let result = QueryExecutor::new(registry).execute(&plan)?;
-    Ok(result.documents.iter().map(|d| d.id.as_str().to_owned()).collect())
+    Ok(result
+        .documents
+        .iter()
+        .map(|d| d.id.as_str().to_owned())
+        .collect())
 }
 
 #[test]
@@ -58,10 +66,13 @@ fn parses_knn_with_optional_ef() {
             ef: Some(40),
         }
     );
-    assert!(matches!(
-        parse_query("KNN(embedding, [1.0])"),
-        Err(QueryError::ParseError(_))
-    ), "k is required");
+    assert!(
+        matches!(
+            parse_query("KNN(embedding, [1.0])"),
+            Err(QueryError::ParseError(_))
+        ),
+        "k is required"
+    );
 }
 
 #[test]
@@ -74,6 +85,7 @@ fn parses_hybrid_with_named_arguments() {
         Query::Hybrid {
             scalar: Some(_),
             vector: Some(v),
+            graph: None,
             fusion,
         } => {
             assert!(matches!(*v, Query::Knn { k: 5, .. }));
@@ -85,14 +97,20 @@ fn parses_hybrid_with_named_arguments() {
         parse_query("HYBRID(scalar: year >= 1)").unwrap(),
         Query::Hybrid { vector: None, .. }
     ));
-    assert!(parse_query("HYBRID(vector: MATCH(title, \"x\"))").is_err(), "vector must be KNN");
+    assert!(
+        parse_query("HYBRID(vector: MATCH(title, \"x\"))").is_err(),
+        "vector must be KNN"
+    );
     assert!(parse_query("HYBRID()").is_err());
 }
 
 #[test]
 fn knn_returns_nearest_by_cosine() {
     let reg = registry();
-    assert_eq!(run(&reg, "KNN(embedding, [1, 0], k=2)").unwrap(), ["d1", "d2"]);
+    assert_eq!(
+        run(&reg, "KNN(embedding, [1, 0], k=2)").unwrap(),
+        ["d1", "d2"]
+    );
     assert_eq!(run(&reg, "KNN(embedding, [0, 1], k=1)").unwrap(), ["d3"]);
 }
 
@@ -100,7 +118,9 @@ fn knn_returns_nearest_by_cosine() {
 fn knn_plan_uses_vector_search_node() {
     let reg = registry();
     let query = parse_query("KNN(embedding, [1, 0], k=2)").unwrap();
-    let plan = QueryPlanner::new().plan("docs", reg.get("docs").unwrap(), &query).unwrap();
+    let plan = QueryPlanner::new()
+        .plan("docs", reg.get("docs").unwrap(), &query)
+        .unwrap();
     match &plan.root {
         PlanNode::Sort { input, .. } => {
             assert!(matches!(**input, PlanNode::VectorSearch { k: 2, .. }));

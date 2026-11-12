@@ -10,6 +10,7 @@ use tpt_search_core::{FieldType, FieldValue, IndexError, QueryError};
 use tpt_search_index::{Collection, Predicate, Term};
 
 use crate::ast::{FusionMethod, Query};
+use tpt_search_graph::GraphQuery;
 
 /// Sort criterion for the final result ordering.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +69,15 @@ pub enum PlanNode {
         input: Box<PlanNode>,
         /// Sort keys, most significant first.
         keys: Vec<SortKey>,
+    },
+    /// Graph pattern match; matched nodes join to documents by id, scored by match count.
+    GraphMatch {
+        /// Collection (and graph) name.
+        index: String,
+        /// Parsed pattern.
+        query: GraphQuery,
+        /// Variable whose bindings are joined to documents.
+        return_var: String,
     },
     /// Top-k nearest neighbours from a vector index, scored by similarity.
     VectorSearch {
@@ -235,11 +245,26 @@ impl Ctx<'_> {
                     text: text.clone(),
                 }
             }
-            Query::Knn { field, vector, k, ef } => {
+            Query::Graph(graph) => PlanNode::GraphMatch {
+                index,
+                query: graph.clone(),
+                return_var: graph.returns[0].clone(),
+            },
+            Query::Knn {
+                field,
+                vector,
+                k,
+                ef,
+            } => {
                 let FieldType::Vector(dim) = self.field_type(field)? else {
                     return Err(QueryError::InvalidField(field.clone()));
                 };
-                if !self.collection.schema().field(field).is_some_and(|f| f.indexed) {
+                if !self
+                    .collection
+                    .schema()
+                    .field(field)
+                    .is_some_and(|f| f.indexed)
+                {
                     return Err(QueryError::InvalidField(field.clone()));
                 }
                 if vector.len() != dim as usize {
@@ -259,6 +284,7 @@ impl Ctx<'_> {
             Query::Hybrid {
                 scalar,
                 vector,
+                graph,
                 fusion,
             } => {
                 let mut inputs = Vec::new();
@@ -268,12 +294,24 @@ impl Ctx<'_> {
                 if let Some(v) = vector {
                     inputs.push(self.node(v)?);
                 }
+                if let Some(g) = graph {
+                    inputs.push(self.node(g)?);
+                }
                 if inputs.is_empty() {
                     return Err(QueryError::ParseError("HYBRID needs an input".into()));
                 }
+                if let FusionMethod::LinearCombination { weights } = fusion {
+                    if !weights.is_empty() && weights.len() != inputs.len() {
+                        return Err(QueryError::ParseError(format!(
+                            "LINEAR has {} weights for {} inputs",
+                            weights.len(),
+                            inputs.len()
+                        )));
+                    }
+                }
                 PlanNode::Fusion {
                     inputs,
-                    method: *fusion,
+                    method: fusion.clone(),
                 }
             }
             Query::Boolean {
@@ -353,6 +391,7 @@ impl Ctx<'_> {
                 .min(total),
             PlanNode::Difference { input, .. } => self.cardinality(input),
             PlanNode::Sort { input, .. } => self.cardinality(input),
+            PlanNode::GraphMatch { .. } => total / 10,
             PlanNode::VectorSearch { k, .. } => (*k).min(total),
             PlanNode::Fusion { inputs, .. } => inputs
                 .iter()
@@ -374,6 +413,7 @@ impl Ctx<'_> {
                 children.iter().map(|c| self.cost(c)).sum::<f64>() + 1.0
             }
             PlanNode::Difference { input, exclude } => self.cost(input) + self.cost(exclude) + 1.0,
+            PlanNode::GraphMatch { .. } => self.collection.len() as f64 + 1.0,
             PlanNode::VectorSearch { k, .. } => {
                 let n = self.collection.len().max(2) as f64;
                 (*k as f64).max(1.0) * n.log2() * 4.0

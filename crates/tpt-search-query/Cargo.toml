@@ -13,6 +13,7 @@ roaring = "0.11.3"
 serde = { version = "1.0.229", features = ["derive"] }
 thiserror = "2.0.21"
 tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
+tpt-search-graph = { version = "0.1.0", path = "../tpt-search-graph" }
 tpt-search-index = { version = "0.1.0", path = "../tpt-search-index" }
 
 [lints]

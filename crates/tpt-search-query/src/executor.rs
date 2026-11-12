@@ -4,12 +4,14 @@
 //! Set operations combine those sets. Scores are summed across the positive
 //! branches they come from, and `Difference` drops the excluded rows.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 
 use roaring::RoaringBitmap;
 use tpt_search_core::{Document, DocumentId, QueryError};
 use tpt_search_index::{Collection, Highlight, PhraseQuery, TermQuery};
+
+use tpt_search_graph::{execute as execute_pattern, GraphError, GraphQuery, DEFAULT_MAX_MATCHES};
 
 use crate::ast::FusionMethod;
 use crate::plan::{PlanNode, QueryPlan, SortKey};
@@ -132,7 +134,7 @@ impl<'a> QueryExecutor<'a> {
         let collection = self.collection(&plan.index)?;
 
         let (sort, limit, body) = split_root(&plan.root)?;
-        let hits = self.eval(body, collection, deadline)?;
+        let hits = self.eval(body, &plan.index, collection, deadline)?;
         let total_hits = hits.rows.len() as usize;
 
         let mut rows: Vec<u32> = hits.rows.iter().collect();
@@ -168,16 +170,46 @@ impl<'a> QueryExecutor<'a> {
             .ok_or_else(|| QueryError::UnknownIndex(name.to_owned()))
     }
 
+    /// Runs a graph pattern on the collection's graph and joins the return variable's
+    /// nodes to live documents with the same id. Each match adds one to the score.
+    fn graph_hits(
+        &self,
+        index: &str,
+        collection: &Collection,
+        query: &GraphQuery,
+        return_var: &str,
+    ) -> Result<Hits, QueryError> {
+        let Some(graph) = self.registry.graph(index) else {
+            return Ok(Hits::default());
+        };
+        let bindings = execute_pattern(graph, query, DEFAULT_MAX_MATCHES).map_err(graph_error)?;
+        let mut counts: HashMap<u32, usize> = HashMap::new();
+        for binding in &bindings {
+            if let Some(id) = binding.get(return_var) {
+                if let Some(row) = collection.row_of(&DocumentId::from(id.as_str())) {
+                    *counts.entry(row).or_default() += 1;
+                }
+            }
+        }
+        let mut hits = Hits::default();
+        for (row, count) in counts {
+            hits.rows.insert(row);
+            hits.scores.insert(row, count as f32);
+        }
+        Ok(hits)
+    }
+
     fn eval(
         &self,
         node: &PlanNode,
+        index: &str,
         collection: &Collection,
         deadline: Option<Instant>,
     ) -> Result<Hits, QueryError> {
         if deadline.is_some_and(|d| Instant::now() > d) {
             return Err(QueryError::Timeout);
         }
-        let recurse = |n: &PlanNode| self.eval(n, collection, deadline);
+        let recurse = |n: &PlanNode| self.eval(n, index, collection, deadline);
         let hits = match node {
             PlanNode::Scan { predicate, .. } => {
                 Hits::from_rows(collection.scan(predicate).map_err(QueryError::Index)?)
@@ -222,8 +254,15 @@ impl<'a> QueryExecutor<'a> {
                 let drop = recurse(exclude)?;
                 keep.minus(&drop)
             }
+            PlanNode::GraphMatch {
+                query, return_var, ..
+            } => self.graph_hits(index, collection, query, return_var)?,
             PlanNode::VectorSearch {
-                field, vector, k, ef, ..
+                field,
+                vector,
+                k,
+                ef,
+                ..
             } => Hits::from_scored(
                 collection
                     .knn(field, vector, *k, *ef)
@@ -234,7 +273,7 @@ impl<'a> QueryExecutor<'a> {
                 for input in inputs {
                     lists.push(recurse(input)?);
                 }
-                fuse(lists, *method)
+                fuse(lists, method)
             }
             PlanNode::Sort { .. } | PlanNode::Limit { .. } => {
                 return Err(QueryError::InvalidPlan(
@@ -256,27 +295,112 @@ impl<'a> QueryExecutor<'a> {
 /// Sort keys, optional limit, and plan body, as split from the root node.
 type SplitRoot<'a> = (Option<&'a [SortKey]>, Option<usize>, &'a PlanNode);
 
-/// Fuses ranked inputs with reciprocal rank fusion: each document scores
-/// `sum(1 / (k + rank))` over the inputs that contain it, with rank starting at 1.
-fn fuse(lists: Vec<Hits>, method: FusionMethod) -> Hits {
-    let FusionMethod::ReciprocalRankFusion { k } = method;
+/// Fuses ranked inputs according to `method`. Every method returns a score where
+/// larger is better, so the root sort orders the fused result.
+fn fuse(lists: Vec<Hits>, method: &FusionMethod) -> Hits {
+    match method {
+        FusionMethod::ReciprocalRankFusion { k } => rrf(lists, *k),
+        FusionMethod::LinearCombination { weights } => linear(lists, weights),
+        FusionMethod::Interleaving => interleave(lists),
+    }
+}
+
+/// Row numbers ordered by score, best first, ties by row number.
+fn ranked(list: &Hits) -> Vec<u32> {
+    let mut rows: Vec<u32> = list.rows.iter().collect();
+    rows.sort_by(|a, b| {
+        let sa = list.scores.get(a).copied().unwrap_or(0.0);
+        let sb = list.scores.get(b).copied().unwrap_or(0.0);
+        sb.partial_cmp(&sa)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.cmp(b))
+    });
+    rows
+}
+
+/// Moves a list's highlight spans into the output.
+fn absorb_highlights(out: &mut Hits, list: Hits) {
+    for (row, spans) in list.highlights {
+        out.highlights.entry(row).or_default().extend(spans);
+    }
+}
+
+/// Reciprocal rank fusion: each input contributes `1 / (k + rank)`, rank starting at 1.
+fn rrf(lists: Vec<Hits>, k: usize) -> Hits {
     let mut out = Hits::default();
     for list in lists {
-        let mut ranked: Vec<u32> = list.rows.iter().collect();
-        ranked.sort_by(|a, b| {
-            let sa = list.scores.get(a).copied().unwrap_or(0.0);
-            let sb = list.scores.get(b).copied().unwrap_or(0.0);
-            sb.partial_cmp(&sa).unwrap_or(std::cmp::Ordering::Equal).then(a.cmp(b))
-        });
-        for (rank, row) in ranked.iter().enumerate() {
+        for (rank, row) in ranked(&list).iter().enumerate() {
             out.rows.insert(*row);
             *out.scores.entry(*row).or_insert(0.0) += 1.0 / (k as f32 + rank as f32 + 1.0);
         }
-        for (row, spans) in list.highlights {
-            out.highlights.entry(row).or_default().extend(spans);
-        }
+        absorb_highlights(&mut out, list);
     }
     out
+}
+
+/// Weighted sum of min-max normalized scores, one weight per input (default 1.0).
+/// An input whose scores are all equal contributes its full weight to each row.
+fn linear(lists: Vec<Hits>, weights: &[f32]) -> Hits {
+    let mut out = Hits::default();
+    for (i, list) in lists.into_iter().enumerate() {
+        let weight = weights.get(i).copied().unwrap_or(1.0);
+        let values: Vec<f32> = list
+            .rows
+            .iter()
+            .map(|r| list.scores.get(&r).copied().unwrap_or(0.0))
+            .collect();
+        let lo = values.iter().copied().fold(f32::INFINITY, f32::min);
+        let hi = values.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+        for row in list.rows.iter() {
+            let score = list.scores.get(&row).copied().unwrap_or(0.0);
+            let norm = if hi > lo {
+                (score - lo) / (hi - lo)
+            } else {
+                1.0
+            };
+            out.rows.insert(row);
+            *out.scores.entry(row).or_insert(0.0) += weight * norm;
+        }
+        absorb_highlights(&mut out, list);
+    }
+    out
+}
+
+/// Round-robin across the ranked inputs, skipping documents already taken. Earlier
+/// positions score higher.
+fn interleave(lists: Vec<Hits>) -> Hits {
+    let rankings: Vec<Vec<u32>> = lists.iter().map(ranked).collect();
+    let longest = rankings.iter().map(Vec::len).max().unwrap_or(0);
+    let mut order = Vec::new();
+    let mut taken = HashSet::new();
+    for position in 0..longest {
+        for ranking in &rankings {
+            if let Some(&row) = ranking.get(position) {
+                if taken.insert(row) {
+                    order.push(row);
+                }
+            }
+        }
+    }
+    let mut out = Hits::default();
+    for (i, row) in order.iter().enumerate() {
+        out.rows.insert(*row);
+        out.scores.insert(*row, (order.len() - i) as f32);
+    }
+    for list in lists {
+        absorb_highlights(&mut out, list);
+    }
+    out
+}
+
+/// Maps graph-layer errors onto query errors.
+fn graph_error(e: GraphError) -> QueryError {
+    match e {
+        GraphError::TooManyMatches(n) => {
+            QueryError::ResourceExhausted(format!("graph pattern matched more than {n} rows"))
+        }
+        other => QueryError::ParseError(other.to_string()),
+    }
 }
 
 /// Splits the optional root `Limit` and `Sort` from the body of a plan.
