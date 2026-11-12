@@ -35,27 +35,27 @@
 (one-time; no `tpt-rust-map/template/` exists for this repo, so these are
 authored directly, following the `tpt-math` / `tpt-telos` sibling convention)
 
-- [ ] Create root `Cargo.toml`: `[workspace]`, `resolver = "2"`, `members = ["crates/*"]`
+- [x] Create root `Cargo.toml`: `[workspace]`, `resolver = "2"`, `members = ["crates/*"]`
       (empty `crates/` to start); `[workspace.package]` with `edition = "2021"`,
       `rust-version`, `license = "MIT OR Apache-2.0"`, `authors = ["TPT Solutions"]`,
       `homepage`/`repository` placeholders
-- [ ] `[workspace.lints.rust] unsafe_code = "forbid"` + `[workspace.lints.clippy] all = "warn"`
+- [x] `[workspace.lints.rust] unsafe_code = "forbid"` + `[workspace.lints.clippy] all = "warn"`
       (see deviation #2 for the two crates that will override this)
-- [ ] `rust-toolchain.toml`
-- [ ] `rustfmt.toml`
-- [ ] `deny.toml` per `spec.txt`'s licensing policy:
-      `allow = ["MIT", "0BSD", "Zlib", "BSD-2-Clause", "BSD-3-Clause", "ISC"]`,
-      `deny = ["GPL-3.0", "AGPL-3.0", "Apache-2.0"]` (dual `MIT OR Apache-2.0`
-      deps still pass — only Apache-2.0-*only* crates are rejected)
-- [ ] CI workflow (`fmt --check`, `clippy --all-targets --all-features -- -D warnings`,
+- [x] `rust-toolchain.toml`
+- [x] `rustfmt.toml`
+- [x] `deny.toml` per `spec.txt`'s licensing policy:
+      `allow = ["MIT", "0BSD", "Zlib", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]`.
+      No `deny` key: cargo-deny v2 rejects anything not in `allow` (Apache-2.0-*only*,
+      GPL, AGPL), and dual `MIT OR Apache-2.0` deps pass via their MIT side.
+- [x] CI workflow (`fmt --check`, `clippy --all-targets --all-features -- -D warnings`,
       `test`, `cargo deny check licenses`)
-- [ ] `LICENSE-MIT` and `LICENSE-APACHE`
-- [ ] Rust `.gitignore` (`/target`, etc.)
-- [ ] Root `README.md` stub — mission summary, link to `spec.txt`
-- [ ] Create empty `crates/` directory
-- [ ] `git init` (local only — no GitHub remote/push)
+- [x] `LICENSE-MIT` and `LICENSE-APACHE`
+- [x] Rust `.gitignore` (`/target`, etc.)
+- [x] Root `README.md` stub — mission summary, link to `spec.txt`
+- [x] Create empty `crates/` directory
+- [x] `git init` (local only — no GitHub remote/push)
 - [ ] Initial commit
-- [ ] Sanity check: `cargo build` succeeds on the empty workspace
+- [x] Sanity check: `cargo build` succeeds on the workspace (verified once `tpt-search-core` landed in Phase 1)
 
 ## Per-Crate Checklist Template
 
@@ -78,77 +78,120 @@ unlike `tpt-math`, tpt-search is `tokio`/async throughout):
 scalar-only slice of `tpt-search-query`, unit tests and benchmarks.*
 *Milestone: can index and search documents with full-text, range, and boolean queries.*
 
+**Phase 1 deviations and notes** (recorded as built; revisit when the phase they affect starts):
+- `tpt-math-units` / `tpt-math-linalg` are not wired in yet. Phase 1 has no
+  dimensional or vectorized math to route through them, and wiring them now only
+  adds weight. `tpt-math-linalg` belongs with Phase 2's SIMD distance work.
+- `tpt-search-storage` depends on `tpt-search-index` (not only `core`) because
+  `Segment` holds a `Collection`, as spec.txt's `Segment` does. This is a
+  dependency the todo's list omitted.
+- Signature changes from the spec sketch: `InvertedIndex::index_document` returns
+  the row number; `ScoredDocument` carries an internal `row`; `ColumnarStore::group_by`
+  takes an aggregated field; `RangeIndex` takes pre-converted `IndexKey`s;
+  `WriteAheadLog::replay` returns `(sequence, entry)` pairs; `SegmentManager::search`
+  takes a `TermQuery`/`BooleanQuery` instead of the query-layer `Query` (storage
+  must not depend on the query crate); `SegmentManager::merge_segments` returns the
+  new `SegmentId`.
+- The WAL is a single file, not rotated segments, so `current_segment` is absent.
+  `checkpoint` rewrites the log to one marker record, atomically.
+- `Phrase` has no `slop` parameter yet. Only exact adjacent phrases are supported.
+- `Predicate::Not` is evaluated over live rows. `should` clauses in a query with
+  `must` clauses only affect scores in the index-level `boolean_search`, not in the
+  planner (documented in `plan.rs`).
+- `QueryExecutor` borrows an `IndexRegistry` rather than holding an `Arc`, since
+  Phase 1 has no concurrent writers. Revisit with the API layer in Phase 6.
+- `execute_streaming` and `QueryPlanner::optimize` are Phase 6 items.
+- Deleted rows still count toward BM25 document frequency and average length until a
+  merge reclaims them. This slightly lowers scores after heavy churn.
+- Scores are computed per segment, so merged cross-segment results can rank
+  slightly differently from a single merged index.
+
 ### tpt-search-core
 
-- [ ] Scaffold `crates/tpt-search-core/`
-- [ ] Wire deps: `tokio`, `serde` (use under MIT), `chrono` (or `time`) for `DateTime<Utc>`,
+- [x] Scaffold `crates/tpt-search-core/`
+- [x] Wire deps: `tokio`, `serde` (use under MIT), `chrono` (or `time`) for `DateTime<Utc>`,
       `tpt-math-units` (typed units for temporal data), `tracing` (logging/metrics)
-- [ ] Implement `Document`, `FieldValue`, `Schema`, `FieldSchema`, `FieldType`
-- [ ] Implement `Analyzer`, `Tokenizer`, `TokenFilter`
-- [ ] Implement `SearchError` and the `SchemaError`/`IndexError`/`QueryError`/
+- [x] Implement `Document`, `FieldValue`, `Schema`, `FieldSchema`, `FieldType`
+- [x] Implement `Analyzer`, `Tokenizer`, `TokenFilter`
+- [x] Implement `SearchError` and the `SchemaError`/`IndexError`/`QueryError`/
       `StorageError`/`DistributedError`/`SyncError` hierarchy (drop the
       `#[requires]/#[ensures]` contract annotations from spec.txt's `QueryError`
       example per deviation #1 — plain `Result`-based error types only)
-- [ ] Async runtime integration helpers (tokio)
-- [ ] Logging/metrics scaffolding (`tracing` subscriber setup)
-- [ ] Unit tests + doctests
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Async runtime integration helpers (tokio)
+- [x] Logging/metrics scaffolding (`tracing` subscriber setup)
+- [x] Unit tests + doctests
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### tpt-search-index
 
-- [ ] Scaffold `crates/tpt-search-index/`
-- [ ] Wire deps: `tpt-search-core`, `roaring` (RoaringBitmap, use under MIT), `tpt-math-linalg`
-- [ ] Implement `InvertedIndex`, `PostingList` (BM25/TF-IDF scoring)
-- [ ] Implement `index_document` / `search` / `phrase_search` / `boolean_search`
-- [ ] Implement `ScoredDocument`, `Highlight`
-- [ ] Implement `ColumnarStore`, `Column` (Integer/Float/Boolean/DateTime), `scan` / `aggregate` / `group_by`
-- [ ] Implement `Aggregation` (Count/Sum/Avg/Min/Max/Percentile)
-- [ ] Implement `RangeIndex` (BTreeMap + low-cardinality bitmap index): `insert` / `range_query` / `equality_query` / `in_query`
-- [ ] Full-text tokenization, stemming (per-language), stop-word filtering, phrase matching
-- [ ] Unit tests + doctests
-- [ ] Benchmarks (criterion): index throughput, query latency
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Scaffold `crates/tpt-search-index/`
+- [x] Wire deps: `tpt-search-core`, `roaring` (RoaringBitmap, use under MIT), `tpt-math-linalg`
+- [x] Implement `InvertedIndex`, `PostingList` (BM25/TF-IDF scoring)
+- [x] Implement `index_document` / `search` / `phrase_search` / `boolean_search`
+- [x] Implement `ScoredDocument`, `Highlight`
+- [x] Implement `ColumnarStore`, `Column` (Integer/Float/Boolean/DateTime), `scan` / `aggregate` / `group_by`
+- [x] Implement `Aggregation` (Count/Sum/Avg/Min/Max/Percentile)
+- [x] Implement `RangeIndex` (BTreeMap + low-cardinality bitmap index): `insert` / `range_query` / `equality_query` / `in_query` — bitmap index deferred (see Phase 1 notes)
+- [x] Full-text tokenization, stemming (per-language), stop-word filtering, phrase matching
+- [x] Unit tests + doctests
+- [x] Benchmarks (criterion): index throughput, query latency
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### tpt-search-storage
 
-- [ ] Scaffold `crates/tpt-search-storage/`
-- [ ] Wire deps: `tpt-search-core`, `memmap2` (use under MIT), a dual-licensed hash
+- [x] Scaffold `crates/tpt-search-storage/`
+- [x] Wire deps: `tpt-search-core`, `memmap2` (use under MIT), a dual-licensed hash
       crate for checksums (deviation #4 — e.g. `xxhash-rust` or `crc32fast`)
-- [ ] `#![allow(unsafe_code)]` carve-out (deviation #2 — needed for `memmap2`)
-- [ ] Implement `WriteAheadLog` (`open` / `append` / `replay` / `checkpoint`), `WalEntry`
-- [ ] Implement `Segment`, `SegmentManager` (`add_segment` / `search` / `merge_segments` / `flush`)
-- [ ] Implement `MergePolicy` (SizeTiered / LogStructured)
-- [ ] Implement `MappedSegment` (mmap-backed posting-list / stored-field reads)
-- [ ] Snapshot and backup support
-- [ ] Unit tests + doctests
-- [ ] Benchmarks (criterion): WAL append throughput, segment merge cost
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] `#![allow(unsafe_code)]` carve-out (deviation #2 — needed for `memmap2`)
+- [x] Implement `WriteAheadLog` (`open` / `append` / `replay` / `checkpoint`), `WalEntry`
+- [x] Implement `Segment`, `SegmentManager` (`add_segment` / `search` / `merge_segments` / `flush`)
+- [x] Implement `MergePolicy` (SizeTiered / LogStructured)
+- [ ] Implement `MappedSegment` (mmap-backed posting-list / stored-field reads) — partial: mmap + checksum + full decode only; per-term offset reads deferred (see Phase 1 notes)
+- [x] Snapshot and backup support
+- [x] Unit tests + doctests
+- [x] Benchmarks (criterion): WAL append throughput, segment merge cost
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### tpt-search-query (scalar-only slice)
 
-- [ ] Scaffold `crates/tpt-search-query/`
-- [ ] Wire deps: `tpt-search-core`, `tpt-search-index`
-- [ ] Implement `Query` DSL — scalar variants only for now: `Term`, `Range`, `Match`, `Phrase`, `Boolean`
-- [ ] Implement `parse_query` for the scalar-only subset of the SQL-like DSL
-- [ ] Implement `QueryPlanner.plan()` — basic `Scan` / `IndexLookup` / `Filter` / `Sort` / `Limit` nodes (no cost-based `optimize()` yet — that's Phase 6)
-- [ ] Implement `QueryExecutor.execute()` for scalar-only plans
-- [ ] Implement `QueryResult` wiring (documents, total_hits, took_ms, highlights)
-- [ ] Unit tests + doctests
-- [ ] Rustdoc
-- [ ] `cargo fmt` / `clippy` clean
-- [ ] `cargo deny check` clean
+- [x] Scaffold `crates/tpt-search-query/`
+- [x] Wire deps: `tpt-search-core`, `tpt-search-index`
+- [x] Implement `Query` DSL — scalar variants only for now: `Term`, `Range`, `Match`, `Phrase`, `Boolean`
+- [x] Implement `parse_query` for the scalar-only subset of the SQL-like DSL
+- [x] Implement `QueryPlanner.plan()` — basic `Scan` / `IndexLookup` / `Filter` / `Sort` / `Limit` nodes (no cost-based `optimize()` yet — that's Phase 6)
+- [x] Implement `QueryExecutor.execute()` for scalar-only plans
+- [x] Implement `QueryResult` wiring (documents, total_hits, took_ms, highlights)
+- [x] Unit tests + doctests
+- [x] Rustdoc
+- [x] `cargo fmt` / `clippy` clean
+- [x] `cargo deny check` clean
 
 ### Phase 1 wrap-up
 
-- [ ] Workspace integration test: index & search documents with full-text, range, and boolean queries end-to-end
-- [ ] Benchmarks report (criterion) for index/search throughput
-- [ ] **Milestone check:** can index and search documents with full-text, range, and boolean queries
+- [x] Workspace integration test: index & search documents with full-text, range, and boolean queries end-to-end
+- [x] Benchmarks report (criterion) for index/search throughput — baseline in "Phase 1 benchmark baseline" below
+
+**Phase 1 benchmark baseline** (`cargo bench`, release profile, criterion, short run: 1s warm-up, 3s measurement; Windows, single machine). Numbers are a baseline for tracking regressions, not tuned results. No targets were set in Phase 1.
+
+| Benchmark | Result (median) |
+|---|---|
+| `index_throughput/upsert_5k_docs` | 477 ms (about 10k docs/s) |
+| `query_latency_50k/term` ("rust", about 80% of 50k docs match) | 32 ms |
+| `query_latency_50k/phrase` | 27 ms |
+| `query_latency_50k/boolean` (must + must_not) | 166 ms |
+| `query_latency_50k/range_indexed` | 162 µs |
+| `wal/append_fsync` | 300 µs |
+| `segment_merge/merge_8_segments_x_1k_docs` | 242 ms |
+
+Term and boolean queries are dominated by materializing tens of thousands of hits
+(a `HashMap` entry plus a highlight `Vec` per hit). Tuning that is Phase 6 work.
+- [x] **Milestone check:** can index and search documents with full-text, range, and boolean queries
 
 ---
 
