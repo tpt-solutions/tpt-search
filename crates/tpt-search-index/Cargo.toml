@@ -1,0 +1,27 @@
+[package]
+name = "tpt-search-index"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+chrono = "0.4.45"
+roaring = { version = "0.11.3", features = ["serde"] }
+serde = { version = "1.0.229", features = ["derive", "rc"] }
+thiserror = "2.0.21"
+tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
+tpt-search-vector = { version = "0.1.0", path = "../tpt-search-vector" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+criterion = "0.7.0"
+
+[[bench]]
+name = "index_bench"
+harness = false
