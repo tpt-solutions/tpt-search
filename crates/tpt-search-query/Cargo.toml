@@ -1,0 +1,22 @@
+[package]
+name = "tpt-search-query"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+roaring = "0.11.3"
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
+tpt-search-index = { version = "0.1.0", path = "../tpt-search-index" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tpt-search-storage = { path = "../tpt-search-storage" }
