@@ -33,6 +33,7 @@
 
 pub mod ast;
 pub mod executor;
+pub mod optimizer;
 pub mod parser;
 pub mod plan;
 pub mod registry;

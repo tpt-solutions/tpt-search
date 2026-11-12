@@ -173,9 +173,9 @@ impl QueryPlanner {
     }
 }
 
-struct Ctx<'a> {
-    index: &'a str,
-    collection: &'a Collection,
+pub(crate) struct Ctx<'a> {
+    pub(crate) index: &'a str,
+    pub(crate) collection: &'a Collection,
 }
 
 impl Ctx<'_> {
@@ -363,7 +363,7 @@ impl Ctx<'_> {
     }
 
     /// Estimated number of rows a node produces.
-    fn cardinality(&self, node: &PlanNode) -> usize {
+    pub(crate) fn cardinality(&self, node: &PlanNode) -> usize {
         let total = self.collection.len();
         match node {
             PlanNode::Scan { predicate, .. } => match scan_field(predicate) {
@@ -403,7 +403,7 @@ impl Ctx<'_> {
     }
 
     /// Relative work: the sum of the rows each leaf reads.
-    fn cost(&self, node: &PlanNode) -> f64 {
+    pub(crate) fn cost(&self, node: &PlanNode) -> f64 {
         match node {
             PlanNode::Scan { .. } | PlanNode::All { .. } | PlanNode::PhraseLookup { .. } => {
                 self.cardinality(node).max(1) as f64 + self.collection.len() as f64 * 0.01
