@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Graph search for tpt-search: property graph, traversal, analytics, and pattern matching"

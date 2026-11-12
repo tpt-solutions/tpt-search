@@ -5,7 +5,6 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-homepage.workspace = true
 repository.workspace = true
 readme = "README.md"
 description = "Distributed layer for tpt-search: sharding, query routing, and Raft consensus"
@@ -18,7 +17,6 @@ thiserror = "2.0.21"
 tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
 tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
 tpt-search-index = { version = "0.1.0", path = "../tpt-search-index" }
-tpt-search-query = { version = "0.1.0", path = "../tpt-search-query" }
 
 [lints]
 workspace = true

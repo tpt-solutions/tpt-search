@@ -8,7 +8,6 @@ rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 authors = ["TPT Solutions"]
 # Placeholders until the public repository location is decided.
-homepage = "https://github.com/tpt-solutions/tpt-search"
 repository = "https://github.com/tpt-solutions/tpt-search"
 
 [workspace.lints.rust]
