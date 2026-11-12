@@ -27,3 +27,9 @@ wildcards = "deny"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+# target-lexicon is a build-time dependency of pyo3 (via pyo3-build-config), licensed
+# "Apache-2.0 WITH LLVM-exception". Allowed for this one crate, approved by the maintainer.
+[[licenses.exceptions]]
+name = "target-lexicon"
+allow = ["Apache-2.0 WITH LLVM-exception"]
