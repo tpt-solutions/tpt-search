@@ -1,0 +1,23 @@
+[package]
+name = "tpt-search-vector"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
+
+[lints.rust]
+unsafe_code = "deny" # crate-level #![allow] carve-out for SIMD intrinsics
+
+[lints.clippy]
+all = "warn"
+
+[dev-dependencies]
+criterion = "0.7.0"
+proptest = "1.11.0"
