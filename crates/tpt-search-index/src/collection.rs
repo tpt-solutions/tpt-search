@@ -256,16 +256,19 @@ impl Collection {
         k: usize,
         ef: Option<usize>,
     ) -> Result<Vec<ScoredDocument>, IndexError> {
-        let index = self.vectors.get(field).ok_or_else(|| match self.schema.field(field) {
-            Some(f) if matches!(f.field_type, FieldType::Vector(_)) => {
-                IndexError::NotIndexed(field.to_owned())
-            }
-            Some(_) => IndexError::Unsupported {
-                field: field.to_owned(),
-                operation: "vector search",
-            },
-            None => IndexError::UnknownField(field.to_owned()),
-        })?;
+        let index = self
+            .vectors
+            .get(field)
+            .ok_or_else(|| match self.schema.field(field) {
+                Some(f) if matches!(f.field_type, FieldType::Vector(_)) => {
+                    IndexError::NotIndexed(field.to_owned())
+                }
+                Some(_) => IndexError::Unsupported {
+                    field: field.to_owned(),
+                    operation: "vector search",
+                },
+                None => IndexError::UnknownField(field.to_owned()),
+            })?;
         let ef = ef.unwrap_or(index.config().ef_search);
         let hits = index.search_filtered(query, k, ef, |key| self.is_live(key as u32))?;
         Ok(hits

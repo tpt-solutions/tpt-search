@@ -53,10 +53,22 @@ fn deleted_and_superseded_documents_are_not_returned() {
     c.upsert(&item("d", [9.0, 9.0, 9.0])).unwrap();
     // Query where the deleted "b" used to be, and where "d" now is.
     let near_b = c.knn("embedding", &[1.0, 0.0, 0.0], 3, Some(50)).unwrap();
-    assert!(!ids(&near_b).contains(&"b".to_owned()), "deleted doc returned");
+    assert!(
+        !ids(&near_b).contains(&"b".to_owned()),
+        "deleted doc returned"
+    );
     let near_old_d = c.knn("embedding", &[0.5, 0.0, 0.0], 4, Some(50)).unwrap();
-    let d_hits: Vec<_> = near_old_d.iter().filter(|h| h.doc_id.as_str() == "d").collect();
-    assert!(d_hits.len() <= 1 && d_hits.iter().all(|h| h.row == c.row_of(&DocumentId::from("d")).unwrap()), "superseded row returned");
+    let d_hits: Vec<_> = near_old_d
+        .iter()
+        .filter(|h| h.doc_id.as_str() == "d")
+        .collect();
+    assert!(
+        d_hits.len() <= 1
+            && d_hits
+                .iter()
+                .all(|h| h.row == c.row_of(&DocumentId::from("d")).unwrap()),
+        "superseded row returned"
+    );
     let near_d = c.knn("embedding", &[9.0, 9.0, 9.0], 2, Some(50)).unwrap();
     assert_eq!(ids(&near_d), ["d", "c"]);
     assert_eq!(near_d[0].row, c.row_of(&DocumentId::from("d")).unwrap());
@@ -96,7 +108,8 @@ fn knn_rejects_non_vector_fields_and_bad_queries() {
 #[test]
 fn documents_without_a_vector_are_never_returned() {
     let mut c = collection();
-    c.upsert(&Document::new("no-vector").with_field("name", "plain")).unwrap();
+    c.upsert(&Document::new("no-vector").with_field("name", "plain"))
+        .unwrap();
     let hits = c.knn("embedding", &[0.0, 0.0, 0.0], 10, Some(50)).unwrap();
     assert!(!ids(&hits).contains(&"no-vector".to_owned()));
     assert_eq!(hits.len(), 4);
