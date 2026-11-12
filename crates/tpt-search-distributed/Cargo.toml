@@ -1,0 +1,23 @@
+[package]
+name = "tpt-search-distributed"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { version = "1.0.229", features = ["derive"] }
+thiserror = "2.0.21"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
+tpt-search-index = { version = "0.1.0", path = "../tpt-search-index" }
+tpt-search-query = { version = "0.1.0", path = "../tpt-search-query" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "macros", "time", "sync"] }

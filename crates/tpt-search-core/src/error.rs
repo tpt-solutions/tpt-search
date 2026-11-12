@@ -170,6 +170,12 @@ pub enum DistributedError {
     /// Consensus could not be reached or was lost.
     #[error("consensus error: {0}")]
     Consensus(String),
+    /// The cluster configuration is invalid.
+    #[error("invalid cluster configuration: {0}")]
+    InvalidConfig(String),
+    /// A shard has no reachable replica.
+    #[error("shard {0} has no reachable replica")]
+    ShardUnavailable(u32),
 }
 
 /// Errors from edge-to-cloud synchronization. Reserved for Phase 5.
