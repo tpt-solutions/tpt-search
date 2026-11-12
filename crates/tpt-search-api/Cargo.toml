@@ -1,0 +1,36 @@
+[package]
+name = "tpt-search-api"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+description = "HTTP and WebSocket API for tpt-search, built on hyper"
+keywords = ["http", "websocket", "hyper", "search-api", "rest"]
+categories = ["web-programming::http-server", "web-programming::websocket"]
+
+[dependencies]
+base64 = "0.23.1"
+bytes = "1.12.1"
+chrono = "0.4.45"
+futures-util = "0.3.34"
+http = "1.5.0"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["server", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha1 = "0.11.0"
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "sync", "time", "io-util", "signal"] }
+tpt-search-core = { version = "0.1.0", path = "../tpt-search-core" }
+tpt-search-index = { version = "0.1.0", path = "../tpt-search-index" }
+tpt-search-query = { version = "0.1.0", path = "../tpt-search-query" }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tokio = { version = "1.54.1", features = ["rt-multi-thread", "net", "macros", "io-util"] }
