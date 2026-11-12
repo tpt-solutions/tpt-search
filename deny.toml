@@ -1,0 +1,29 @@
+# cargo-deny configuration — license and dependency hygiene.
+# See https://embarkstudios.github.io/cargo-deny/
+#
+# Licensing policy (spec.txt): permissive licenses only. cargo-deny v2 rejects
+# any license not in `allow`, so Apache-2.0-only crates (and GPL/AGPL) fail
+# automatically. Dual `MIT OR Apache-2.0` crates pass via their MIT side.
+
+[graph]
+targets = [
+    "x86_64-unknown-linux-gnu",
+    "x86_64-pc-windows-msvc",
+    "aarch64-apple-darwin",
+]
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+allow = ["MIT", "0BSD", "Zlib", "BSD-2-Clause", "BSD-3-Clause", "ISC", "Unicode-3.0"]
+confidence-threshold = 0.9
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
